@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Hệ thống giám sát và điều phối xe buýt</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css" rel="stylesheet">
+    <link href="/assets/css/styles.css" rel="stylesheet">
+  </head>
+  <body>
+    <div class="page-shell py-3 py-lg-4">
+      <header class="app-header">
+        <div class="d-flex align-items-center gap-3 min-w-0">
+          <img src="/assets/images/utc_logo.png" alt="UTC" class="brand-logo">
+          <img src="/assets/images/feee_logo.png" alt="FEEE" class="brand-logo">
+          <div class="min-w-0">
+            <div class="header-kicker">NGHIÊN CỨU KHOA HỌC SINH VIÊN</div>
+            <div class="header-title">HỆ THỐNG GIÁM SÁT VÀ ĐIỀU PHỐI XE BUÝT</div>
+            <div class="header-subtitle">Ứng dụng IoT cho định vị, giám sát và điều phối phương tiện công cộng</div>
+          </div>
+        </div>
+        <div class="dropdown">
+          <button class="btn btn-light user-menu" data-bs-toggle="dropdown" type="button">
+            <i class="bi bi-person-circle"></i>
+            <span id="currentUser">Tài khoản</span>
+            <i class="bi bi-chevron-down"></i>
+          </button>
+          <ul class="dropdown-menu dropdown-menu-end">
+            <li><span class="dropdown-item-text" id="currentRole">Vai trò</span></li>
+            <li><hr class="dropdown-divider"></li>
+            <li><button class="dropdown-item" type="button" data-action="profile"><i class="bi bi-person"></i> Thông tin cá nhân</button></li>
+            <li><button class="dropdown-item" type="button" data-action="password"><i class="bi bi-key"></i> Đổi mật khẩu</button></li>
+            <li><button class="dropdown-item text-danger" type="button" id="logoutBtn"><i class="bi bi-box-arrow-right"></i> Đăng xuất</button></li>
+          </ul>
+        </div>
+      </header>
+
+      <nav class="nav-strip" id="mainNav"></nav>
+      <div id="toastHost" class="toast-container position-fixed top-0 end-0 p-3"></div>
+      <main id="appRoot"></main>
+    </div>
+
+    <div class="modal fade" id="entityModal" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="entityModalTitle">Cập nhật</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <form id="entityForm">
+            <div class="modal-body">
+              <div id="entityFields" class="row g-3"></div>
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Đóng</button>
+              <button type="submit" class="btn btn-primary"><i class="bi bi-check2"></i> Lưu</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="accountModal" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="accountModalTitle">Tài khoản</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <form id="accountForm">
+            <div class="modal-body" id="accountModalBody"></div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Đóng</button>
+              <button type="submit" class="btn btn-primary"><i class="bi bi-check2"></i> Lưu</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="stopSorterModal" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+          <div class="modal-header">
+            <div>
+              <h5 class="modal-title" id="stopSorterTitle">Sap xep diem dung</h5>
+              <div class="text-secondary small" id="stopSorterMeta"></div>
+            </div>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body">
+            <div class="alert offline-note mb-3">
+              Thu tu diem dung duoc dung khi export route JSON cho SD Card. Backend khong gui danh sach diem dung qua MQTT.
+            </div>
+              <div class="row g-3 align-items-end mb-3">
+                <div class="col-12 col-lg-8">
+                  <label class="form-label" for="stopPicker">Them diem dung vao lo trinh</label>
+                  <select id="stopPicker" class="form-select"></select>
+                </div>
+              <div class="col-12 col-lg-4">
+                <button id="addStopToDirection" class="btn btn-primary w-100" type="button">
+                  <i class="bi bi-plus-lg"></i> Them diem dung
+                  </button>
+                </div>
+              </div>
+              <div class="row g-3">
+                <div class="col-12 col-xl-5">
+                  <div id="stopSorterList" class="stop-sorter-list"></div>
+                </div>
+                <div class="col-12 col-xl-7">
+                  <div class="map-shell sorter-map"><div id="stopSorterMap" class="h-100"></div></div>
+                </div>
+              </div>
+            </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Dong</button>
+            <button type="button" class="btn btn-primary" id="saveStopOrder">
+              <i class="bi bi-check2"></i> Luu thu tu
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="routeGeoJsonModal" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+          <div class="modal-header">
+            <div>
+              <h5 class="modal-title" id="routeGeoJsonTitle">GeoJSON tuyến</h5>
+              <div class="text-secondary small" id="routeGeoJsonMeta"></div>
+            </div>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body">
+            <div class="row g-3">
+              <div class="col-12 col-xl-5">
+                <label class="form-label" for="routeGeoJsonFile">Chọn file GeoJSON</label>
+                <input id="routeGeoJsonFile" class="form-control mb-3" type="file" accept=".geojson,.json,application/geo+json,application/json">
+                <label class="form-label" for="routeGeoJsonText">Nội dung GeoJSON</label>
+                <textarea id="routeGeoJsonText" class="form-control font-monospace" rows="18" spellcheck="false"></textarea>
+              </div>
+              <div class="col-12 col-xl-7">
+                <div class="map-shell route-map"><div id="routeGeoJsonPreviewMap" class="h-100"></div></div>
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-danger me-auto" id="deleteRouteGeoJson">
+              <i class="bi bi-trash"></i> Xóa GeoJSON
+            </button>
+            <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Đóng</button>
+            <button type="button" class="btn btn-primary" id="saveRouteGeoJson">
+              <i class="bi bi-check2"></i> Lưu GeoJSON
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="/assets/js/app.js"></script>
+  </body>
+</html>

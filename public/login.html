@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Đăng nhập - Hệ thống giám sát xe buýt</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+    <link href="/assets/css/styles.css" rel="stylesheet">
+  </head>
+  <body class="login-body">
+    <main class="login-wrap">
+      <section class="login-panel shadow-soft">
+        <div class="brand-row mb-4">
+          <img src="/assets/images/utc_logo.png" alt="UTC" class="brand-logo">
+          <img src="/assets/images/feee_logo.png" alt="FEEE" class="brand-logo">
+          <div>
+            <div class="eyebrow">NGHIÊN CỨU KHOA HỌC SINH VIÊN</div>
+            <h1>Hệ thống giám sát và điều phối xe buýt</h1>
+            <p>Ứng dụng IoT cho định vị, giám sát và điều phối phương tiện công cộng</p>
+          </div>
+        </div>
+        <form id="loginForm" class="auth-form">
+          <div class="mb-3">
+            <label class="form-label" for="username">Tên đăng nhập</label>
+            <div class="input-group">
+              <span class="input-group-text"><i class="bi bi-person"></i></span>
+              <input id="username" name="username" class="form-control" autocomplete="username" required>
+            </div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label" for="password">Mật khẩu</label>
+            <div class="input-group">
+              <span class="input-group-text"><i class="bi bi-shield-lock"></i></span>
+              <input id="password" name="password" type="password" class="form-control" autocomplete="current-password" required>
+            </div>
+          </div>
+          <div id="loginAlert" class="alert alert-danger d-none"></div>
+          <button class="btn btn-primary w-100" type="submit">
+            <i class="bi bi-box-arrow-in-right"></i>
+            Đăng nhập
+          </button>
+        </form>
+      </section>
+    </main>
+    <script>
+      document.getElementById("loginForm").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const alertBox = document.getElementById("loginAlert");
+        alertBox.classList.add("d-none");
+        const form = new FormData(event.currentTarget);
+        const button = event.currentTarget.querySelector("button");
+        button.disabled = true;
+        button.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Đang đăng nhập';
+        try {
+          const response = await fetch("/api/auth/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(Object.fromEntries(form)),
+            credentials: "include"
+          });
+          const result = await response.json();
+          if (!result.success) throw new Error(result.message || "Đăng nhập thất bại");
+          window.location.href = "/app";
+        } catch (error) {
+          alertBox.textContent = error.message;
+          alertBox.classList.remove("d-none");
+        } finally {
+          button.disabled = false;
+          button.innerHTML = '<i class="bi bi-box-arrow-in-right"></i> Đăng nhập';
+        }
+      });
+    </script>
+  </body>
+</html>
