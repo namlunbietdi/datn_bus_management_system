@@ -16,6 +16,7 @@ import employeesRoutes from "./routes/employees.routes.js";
 import usersRoutes from "./routes/users.routes.js";
 import dispatchOrdersRoutes from "./routes/dispatchOrders.routes.js";
 import logsRoutes from "./routes/logs.routes.js";
+import runtimeRoutes from "./routes/runtime.routes.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -45,6 +46,7 @@ app.use("/api/employees", employeesRoutes);
 app.use("/api/users", usersRoutes);
 app.use("/api/dispatch-orders", dispatchOrdersRoutes);
 app.use("/api/logs", logsRoutes);
+app.use("/api/runtime", runtimeRoutes);
 
 app.get("/", (_req, res) => {
   res.sendFile(path.join(publicDir, "login.html"));

@@ -4,6 +4,15 @@ import LocationLog from "../models/LocationLog.js";
 import DeviceLastState from "../models/DeviceLastState.js";
 import DeviceEventLog from "../models/DeviceEventLog.js";
 import { logActivity } from "./activityService.js";
+import {
+  assertValidCommand,
+  assertValidUpdateNotification,
+  directionToDb,
+  validateEvent,
+  validateStatus,
+  validateTelemetry,
+  unixToDate
+} from "../contracts/runtimeJsonContract.js";
 
 let client = null;
 let connected = false;
@@ -20,9 +29,17 @@ function mqttUrl() {
   return `${protocol}://${process.env.MQTT_HOST}:${port}`;
 }
 
-function commandTopic(deviceId) {
+function topicPrefix() {
   const prefix = process.env.MQTT_TOPIC_COMMAND_PREFIX || "bus";
-  return `${prefix}/${deviceId}/command`;
+  return prefix.replace(/\/+$/, "");
+}
+
+function commandTopic(deviceId) {
+  return `${topicPrefix()}/${deviceId}/cmd`;
+}
+
+function updateTopic(deviceId) {
+  return `${topicPrefix()}/${deviceId}/update`;
 }
 
 function parseMessage(message) {
@@ -38,73 +55,136 @@ function topicDeviceId(topic) {
   return parts.length >= 3 ? parts[1] : null;
 }
 
-function isValidDirection(direction) {
-  return !direction || ["outbound", "inbound"].includes(direction);
+function rejectInvalid(kind, topic, errors) {
+  console.warn(`Invalid ${kind} payload rejected on ${topic}: ${errors.join("; ")}`);
+}
+
+function assertTopicDevice(kind, topic, payload) {
+  const deviceId = topicDeviceId(topic);
+  if (!deviceId || payload.deviceId !== deviceId) {
+    return [`deviceId must match topic device id (${deviceId || "missing"})`];
+  }
+  return [];
+}
+
+function runtimeFieldsFromTelemetry(payload) {
+  return {
+    routeCode: payload.runtime.routeId,
+    direction: directionToDb(payload.runtime.direction),
+    runtimeStatus: payload.runtime.tripState,
+    tripState: payload.runtime.tripState,
+    currentStop: payload.runtime.currentStop,
+    nextStop: payload.runtime.nextStop,
+    gpsSat: payload.gps.sat,
+    gpsFix: payload.gps.fix,
+    networkMqtt: payload.network.mqtt,
+    networkSignal: payload.network.signal
+  };
+}
+
+function compactObject(value) {
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined));
 }
 
 async function handleTelemetry(topic, message) {
   const payload = parseMessage(message);
-  const deviceId = payload?.deviceId || topicDeviceId(topic);
-  if (!payload || !deviceId || typeof payload.lat !== "number" || typeof payload.lon !== "number") {
-    console.warn("Invalid telemetry payload ignored");
-    return;
-  }
-  if (!isValidDirection(payload.direction)) {
-    console.warn("Invalid telemetry direction ignored");
+  const check = validateTelemetry(payload);
+  const topicErrors = check.valid ? assertTopicDevice("telemetry", topic, payload) : [];
+  if (!check.valid || topicErrors.length) {
+    rejectInvalid("telemetry", topic, [...check.errors, ...topicErrors]);
     return;
   }
 
-  const timestamp = payload.timestamp ? new Date(payload.timestamp) : new Date();
+  const timestamp = unixToDate(payload.timestamp);
+  const deviceId = payload.deviceId;
+  const runtime = runtimeFieldsFromTelemetry(payload);
   await LocationLog.create({
     deviceId,
-    vehiclePlate: payload.vehiclePlate,
-    routeCode: payload.routeCode,
-    direction: payload.direction || null,
-    lat: payload.lat,
-    lon: payload.lon,
-    speed: Number(payload.speed || 0),
-    heading: Number(payload.heading || 0),
+    routeCode: payload.runtime.routeId,
+    direction: runtime.direction,
+    lat: payload.gps.lat,
+    lon: payload.gps.lng,
+    speed: payload.gps.speed,
+    heading: payload.gps.heading,
     timestamp
   });
 
   await DeviceLastState.findOneAndUpdate(
     { deviceId },
-    {
+    compactObject({
       deviceId,
-      vehiclePlate: payload.vehiclePlate,
-      routeCode: payload.routeCode,
-      direction: payload.direction || null,
-      lat: payload.lat,
-      lon: payload.lon,
-      speed: Number(payload.speed || 0),
-      heading: Number(payload.heading || 0),
-      status: Number(payload.speed || 0) > 1 ? "running" : "stopped",
+      routeCode: payload.runtime.routeId,
+      direction: runtime.direction,
+      lat: payload.gps.lat,
+      lon: payload.gps.lng,
+      speed: payload.gps.speed,
+      heading: payload.gps.heading,
+      status: payload.gps.speed > 1 ? "running" : "stopped",
+      ...runtime,
       lastSeenAt: timestamp
-    },
+    }),
     { upsert: true, new: true }
   );
 
   await Device.findOneAndUpdate({ deviceId }, { status: "online", lastSeenAt: timestamp });
 }
 
-async function handleEvent(topic, message) {
+async function handleStatus(topic, message) {
   const payload = parseMessage(message);
-  const deviceId = payload?.deviceId || topicDeviceId(topic);
-  if (!payload || !deviceId || !payload.type) {
-    console.warn("Invalid event payload ignored");
-    return;
-  }
-  if (!isValidDirection(payload.direction)) {
-    console.warn("Invalid event direction ignored");
+  const check = validateStatus(payload);
+  const topicErrors = check.valid ? assertTopicDevice("status", topic, payload) : [];
+  if (!check.valid || topicErrors.length) {
+    rejectInvalid("status", topic, [...check.errors, ...topicErrors]);
     return;
   }
 
-  const timestamp = payload.timestamp ? new Date(payload.timestamp) : new Date();
+  const timestamp = new Date();
+  const update = compactObject({
+    deviceId: payload.deviceId,
+    status: payload.online === false ? "offline" : "online",
+    uptime: payload.uptime,
+    freeHeap: payload.freeHeap,
+    sdReady: payload.sdReady,
+    queueDepth: payload.queueDepth,
+    runtimeStatus: payload.runtimeState,
+    routeVersion: payload.routeVersion,
+    lastSeenAt: timestamp
+  });
+
+  if (typeof payload.lat === "number" && typeof payload.lon === "number") {
+    update.lat = payload.lat;
+    update.lon = payload.lon;
+  }
+  if (typeof payload.speed === "number") update.speed = payload.speed;
+  if (typeof payload.heading === "number") update.heading = payload.heading;
+
+  await DeviceLastState.findOneAndUpdate({ deviceId: payload.deviceId }, update, { upsert: true, new: true });
+  await Device.findOneAndUpdate(
+    { deviceId: payload.deviceId },
+    { status: payload.online === false ? "offline" : "online", lastSeenAt: timestamp }
+  );
+}
+
+async function handleEvent(topic, message) {
+  const payload = parseMessage(message);
+  const check = validateEvent(payload);
+  if (!check.valid) {
+    rejectInvalid("event", topic, check.errors);
+    return;
+  }
+
+  const deviceId = topicDeviceId(topic);
+  if (!deviceId) {
+    rejectInvalid("event", topic, ["topic device id is missing"]);
+    return;
+  }
+  const timestamp = unixToDate(payload.timestamp);
+  const direction = directionToDb(payload.direction);
   await DeviceEventLog.create({
     deviceId,
     type: payload.type,
-    routeCode: payload.routeCode,
-    direction: payload.direction || null,
+    routeCode: payload.routeId,
+    direction,
     stopCode: payload.stopCode,
     payload,
     timestamp
@@ -114,7 +194,7 @@ async function handleEvent(topic, message) {
     action: payload.type,
     module: "DeviceEvent",
     targetId: deviceId,
-    metadata: { routeCode: payload.routeCode, stopCode: payload.stopCode }
+    metadata: { routeId: payload.routeId, stopCode: payload.stopCode }
   });
 }
 
@@ -140,6 +220,7 @@ export function connectMqtt() {
     console.log("MQTT connected to HiveMQ");
     client.subscribe(process.env.MQTT_TOPIC_TELEMETRY || "bus/+/telemetry");
     client.subscribe(process.env.MQTT_TOPIC_EVENT || "bus/+/event");
+    client.subscribe(process.env.MQTT_TOPIC_STATUS || "bus/+/status");
   });
 
   client.on("reconnect", () => console.log("MQTT reconnecting"));
@@ -155,6 +236,10 @@ export function connectMqtt() {
     }
     if (topic.endsWith("/event")) {
       handleEvent(topic, message).catch((error) => console.warn(`Event handling failed: ${error.message}`));
+      return;
+    }
+    if (topic.endsWith("/status")) {
+      handleStatus(topic, message).catch((error) => console.warn(`Status handling failed: ${error.message}`));
     }
   });
 
@@ -165,35 +250,50 @@ export function mqttStatus() {
   return {
     configured: shouldConnect(),
     connected,
-    clientId: process.env.MQTT_CLIENT_ID || null
+    clientId: process.env.MQTT_CLIENT_ID || null,
+    topics: {
+      telemetry: process.env.MQTT_TOPIC_TELEMETRY || "bus/+/telemetry",
+      event: process.env.MQTT_TOPIC_EVENT || "bus/+/event",
+      status: process.env.MQTT_TOPIC_STATUS || "bus/+/status",
+      cmd: `${topicPrefix()}/{deviceId}/cmd`,
+      update: `${topicPrefix()}/{deviceId}/update`
+    }
   };
 }
 
-function publishCommand(deviceId, payload) {
+function publishToTopic(topic, payload) {
   return new Promise((resolve, reject) => {
     if (!client || !connected) {
       reject(new Error("MQTT client is not connected"));
       return;
     }
-    client.publish(commandTopic(deviceId), JSON.stringify(payload), { qos: 1 }, (error) => {
+    client.publish(topic, JSON.stringify(payload), { qos: 1 }, (error) => {
       if (error) reject(error);
-      else resolve({ topic: commandTopic(deviceId), payload });
+      else resolve({ topic, payload });
     });
   });
 }
 
-export function publishRouteOverride(deviceId, routeCode, direction) {
-  return publishCommand(deviceId, { type: "ROUTE_OVERRIDE", routeCode, direction });
+function publishCommand(deviceId, payload) {
+  return publishToTopic(commandTopic(deviceId), assertValidCommand(payload));
 }
 
-export function publishRouteVersion(deviceId, routeCode, version) {
-  return publishCommand(deviceId, { type: "ROUTE_VERSION", routeCode, version });
+export function publishRouteOverride(deviceId, routeCode, direction) {
+  return publishCommand(deviceId, { cmd: "SET_ROUTE", routeId: routeCode, direction: direction === "inbound" ? "BACKWARD" : "FORWARD" });
+}
+
+export function publishRouteUpdate(deviceId, payload) {
+  const updatePayload = assertValidUpdateNotification({
+    type: "ROUTE_UPDATE_AVAILABLE",
+    ...payload
+  });
+  return publishToTopic(updateTopic(deviceId), updatePayload);
 }
 
 export function publishUnlockTrip(deviceId, routeCode, direction) {
-  return publishCommand(deviceId, { type: "UNLOCK_TRIP", routeCode, direction });
+  return publishCommand(deviceId, { cmd: "UNLOCK_TRIP", routeId: routeCode, direction: direction === "inbound" ? "BACKWARD" : "FORWARD" });
 }
 
 export function publishLockTrip(deviceId, routeCode, direction) {
-  return publishCommand(deviceId, { type: "LOCK_TRIP", routeCode, direction });
+  return publishCommand(deviceId, { cmd: "LOCK_TRIP", routeId: routeCode, direction: direction === "inbound" ? "BACKWARD" : "FORWARD" });
 }

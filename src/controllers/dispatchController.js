@@ -3,14 +3,13 @@ import Device from "../models/Device.js";
 import Route from "../models/Route.js";
 import Vehicle from "../models/Vehicle.js";
 import DeviceAssignment from "../models/DeviceAssignment.js";
-import DeviceLastState from "../models/DeviceLastState.js";
 import { ok } from "../utils/apiResponse.js";
 import { AppError } from "../utils/errors.js";
 import { logActivity } from "../services/activityService.js";
 import {
   publishLockTrip,
   publishRouteOverride,
-  publishRouteVersion,
+  publishRouteUpdate,
   publishUnlockTrip
 } from "../services/mqttService.js";
 
@@ -55,6 +54,23 @@ async function assignVehicleToDevice({ device, vehicle, routeCode }) {
   await vehicle.save();
 }
 
+function runtimeBaseUrl(req) {
+  return (process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get("host")}`).replace(/\/+$/, "");
+}
+
+function routeUpdatePayload(req, route) {
+  return {
+    routeId: route.routeCode,
+    version: String(route.version || "1.0"),
+    fileName: `route_${route.routeCode}.json`,
+    url: `${runtimeBaseUrl(req)}/api/runtime/routes/${encodeURIComponent(route.routeCode)}`
+  };
+}
+
+function contractDirection(direction) {
+  return direction === "inbound" ? "BACKWARD" : "FORWARD";
+}
+
 async function createOrder({ req, device, route, vehicle, commandType, direction, payload, departureAt }) {
   await assignVehicleToDevice({ device, vehicle, routeCode: route.routeCode });
   const order = await DispatchOrder.create({
@@ -71,7 +87,7 @@ async function createOrder({ req, device, route, vehicle, commandType, direction
 
   try {
     if (commandType === "ROUTE_OVERRIDE") await publishRouteOverride(device.deviceId, route.routeCode, direction);
-    if (commandType === "ROUTE_VERSION") await publishRouteVersion(device.deviceId, route.routeCode, route.version);
+    if (commandType === "ROUTE_VERSION") await publishRouteUpdate(device.deviceId, routeUpdatePayload(req, route));
     if (commandType === "UNLOCK_TRIP") await publishUnlockTrip(device.deviceId, route.routeCode, direction);
     if (commandType === "LOCK_TRIP") await publishLockTrip(device.deviceId, route.routeCode, direction);
     order.status = "published";
@@ -118,8 +134,8 @@ export async function createDispatchOrder(req, res) {
   const route = await assertRoute(routeCode);
   const vehicle = await assertVehicle(vehicleId);
   const payload = commandType === "ROUTE_VERSION"
-    ? { type: commandType, routeCode, version: route.version }
-    : { type: commandType, routeCode, direction };
+    ? { type: "ROUTE_UPDATE_AVAILABLE", ...routeUpdatePayload(req, route) }
+    : { cmd: commandType === "ROUTE_OVERRIDE" ? "SET_ROUTE" : commandType, routeId: routeCode, direction: contractDirection(direction) };
   const order = await createOrder({ req, device, route, vehicle, commandType, direction, payload, departureAt });
   ok(res, order, 201);
 }
@@ -135,7 +151,7 @@ export async function routeOverride(req, res) {
     route,
     commandType: "ROUTE_OVERRIDE",
     direction,
-    payload: { type: "ROUTE_OVERRIDE", routeCode, direction }
+    payload: { cmd: "SET_ROUTE", routeId: routeCode, direction: contractDirection(direction) }
   });
   ok(res, order, 201);
 }
@@ -165,18 +181,6 @@ export async function returnToDepot(req, res) {
     await Vehicle.findByIdAndUpdate(order.vehicle, { $unset: { currentRoute: "" } });
   }
 
-  await DeviceLastState.findOneAndUpdate(
-    { deviceId: order.deviceId },
-    {
-      routeCode: null,
-      direction: null,
-      vehiclePlate: null,
-      speed: 0,
-      status: "stopped",
-      lastSeenAt: returnAt
-    }
-  );
-
   await logActivity({
     user: req.user,
     action: "RETURN_TO_DEPOT",
@@ -197,7 +201,7 @@ export async function routeVersion(req, res) {
     device,
     route,
     commandType: "ROUTE_VERSION",
-    payload: { type: "ROUTE_VERSION", routeCode, version: route.version }
+    payload: { type: "ROUTE_UPDATE_AVAILABLE", ...routeUpdatePayload(req, route) }
   });
   ok(res, order, 201);
 }
@@ -213,7 +217,7 @@ export async function unlockTrip(req, res) {
     route,
     commandType: "UNLOCK_TRIP",
     direction,
-    payload: { type: "UNLOCK_TRIP", routeCode, direction }
+    payload: { cmd: "UNLOCK_TRIP", routeId: routeCode, direction: contractDirection(direction) }
   });
   ok(res, order, 201);
 }
@@ -229,7 +233,7 @@ export async function lockTrip(req, res) {
     route,
     commandType: "LOCK_TRIP",
     direction,
-    payload: { type: "LOCK_TRIP", routeCode, direction }
+    payload: { cmd: "LOCK_TRIP", routeId: routeCode, direction: contractDirection(direction) }
   });
   ok(res, order, 201);
 }

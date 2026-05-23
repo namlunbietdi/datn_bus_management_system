@@ -21,10 +21,11 @@ function compactStop(stop, index, total, directionStop = {}) {
     : index === 0 || index === total - 1 || Boolean(stop.terminal);
 
   return {
+    index: index + 1,
     stopCode: stop.stopCode,
     name: stop.name,
     lat: Number(stop.lat),
-    lon: Number(stop.lon),
+    lng: Number(stop.lon),
     terminal,
     audio: stop.audio || stop.stopCode
   };
@@ -53,11 +54,11 @@ export async function buildRouteConfig(routeCode) {
   if (!route) throw new AppError("Route not found", 404);
 
   return {
-    version: Number(route.version || 1),
-    routeCode: route.routeCode,
-    displayName: route.displayName,
-    outbound: await buildDirection(route.routeCode, "outbound"),
-    inbound: await buildDirection(route.routeCode, "inbound")
+    routeId: route.routeCode,
+    version: String(route.version || "1.0"),
+    up: await buildDirection(route.routeCode, "outbound"),
+    down: await buildDirection(route.routeCode, "inbound"),
+    updatedAt: Math.floor(new Date(route.updatedAt || route.createdAt || Date.now()).getTime() / 1000)
   };
 }
 
@@ -65,9 +66,21 @@ export async function exportRoute(routeCode, pretty = false) {
   const config = await buildRouteConfig(routeCode);
   const dir = exportDir();
   await fs.mkdir(dir, { recursive: true });
-  const filePath = path.join(dir, routeFileName(config.routeCode));
+  const filePath = path.join(dir, routeFileName(config.routeId));
   await fs.writeFile(filePath, JSON.stringify(config, null, pretty ? 2 : 0));
   return { config, filePath, fileName: path.basename(filePath) };
+}
+
+export async function buildRouteManifest() {
+  const routes = await Route.find({}).sort({ routeCode: 1 }).lean();
+  return {
+    schemaVersion: 1,
+    routes: routes.map((route) => ({
+      routeId: route.routeCode,
+      file: routeFileName(route.routeCode),
+      version: String(route.version || "1.0")
+    }))
+  };
 }
 
 function zipDirectory(files, zipPath) {
@@ -85,20 +98,14 @@ function zipDirectory(files, zipPath) {
 }
 
 export async function exportAllRoutes() {
-  const routes = await Route.find({}).sort({ routeCode: 1 }).lean();
   const dir = exportDir();
   await fs.mkdir(dir, { recursive: true });
 
   const files = [];
-  const manifest = { routes: [] };
-  for (const route of routes) {
-    const { filePath, fileName } = await exportRoute(route.routeCode, false);
+  const manifest = await buildRouteManifest();
+  for (const route of manifest.routes) {
+    const { filePath, fileName } = await exportRoute(route.routeId, false);
     files.push({ path: filePath, name: fileName });
-    manifest.routes.push({
-      routeCode: route.routeCode,
-      file: fileName,
-      version: Number(route.version || 1)
-    });
   }
 
   const manifestPath = path.join(dir, "manifest.json");

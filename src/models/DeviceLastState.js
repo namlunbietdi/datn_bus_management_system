@@ -15,6 +15,23 @@ const deviceLastStateSchema = new mongoose.Schema(
       enum: ["online", "offline", "running", "stopped", "signal_lost"],
       default: "offline"
     },
+    runtimeStatus: String,
+    tripState: String,
+    activeStopCode: String,
+    nextStopCode: String,
+    currentStop: Number,
+    nextStop: Number,
+    routeVersion: String,
+    configVersion: String,
+    sdReady: Boolean,
+    queueDepth: Number,
+    lastEventSeq: Number,
+    uptime: Number,
+    freeHeap: Number,
+    gpsSat: Number,
+    gpsFix: Boolean,
+    networkMqtt: Boolean,
+    networkSignal: Number,
     lastSeenAt: Date
   },
   { timestamps: true }

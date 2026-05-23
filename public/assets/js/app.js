@@ -1242,11 +1242,12 @@ async function renderMonitoring() {
       L.control.zoom({ position: "bottomright" }).addTo(state.map);
     }
     state.markers.forEach((marker) => marker.remove());
-    const rowsWithGps = rows.filter((row) => Number.isFinite(Number(row.lat)) && Number.isFinite(Number(row.lon)));
+    const rowsWithGps = rows.filter((row) => Number.isFinite(Number(row.gps?.lat)) && Number.isFinite(Number(row.gps?.lng)));
     state.markers = rowsWithGps.map((row) => {
-      const marker = L.marker([Number(row.lat), Number(row.lon)]).addTo(state.map);
-      marker.bindPopup(`<strong>${row.vehiclePlate || row.deviceId}</strong><br>${row.routeCode || ""} ${row.direction || ""}<br>${row.gpsStatus === "lost" ? "Vị trí GPS cuối cùng" : `${row.speed || 0} km/h`}`);
-      marker.dispatchOrderId = row.dispatchOrderId;
+      const monitoringKey = row.dispatchOrderId || row.deviceId;
+      const marker = L.marker([Number(row.gps.lat), Number(row.gps.lng)]).addTo(state.map);
+      marker.bindPopup(`<strong>${row.vehiclePlate || row.deviceId}</strong><br>${row.runtime?.routeId || ""} ${row.runtime?.direction || ""}<br>${row.gps?.status === "lost" ? "Vị trí GPS cuối cùng" : `${row.gps?.speed || 0} km/h`}`);
+      marker.monitoringKey = monitoringKey;
       return marker;
     });
     if (state.markers.length) {
@@ -1255,21 +1256,23 @@ async function renderMonitoring() {
       state.map.setView([21.0285, 105.8542], 12);
     }
     document.getElementById("vehicleList").innerHTML = rows.length ? rows.map((row) => `
-      <div class="border-bottom py-3 clickable-row" data-monitoring-order="${row.dispatchOrderId}">
+      <div class="border-bottom py-3 clickable-row" data-monitoring-order="${row.dispatchOrderId || row.deviceId}">
+        <div class="small text-secondary">Runtime: ${row.runtime?.routeId || "-"} ${row.runtime?.direction || ""} - Source: ${row.stateSource === "esp32" ? "ESP32" : "dispatch"}</div>
+        <div class="small">${Number.isInteger(row.runtime?.currentStop) ? `Current stop: ${row.runtime.currentStop}` : ""}${Number.isInteger(row.runtime?.nextStop) ? ` - Next: ${row.runtime.nextStop}` : ""}</div>
         <div class="d-flex justify-content-between gap-2"><strong>${row.vehiclePlate || "Chưa gắn xe"}</strong>${statusBadge(row.status)}</div>
-        <div class="small text-secondary">Thiết bị: ${row.deviceId} · Tuyến: ${row.routeCode || "-"} · Chiều: ${row.direction || "-"}</div>
+        <div class="small text-secondary">Thiết bị: ${row.deviceId} · Tuyến: ${row.runtime?.routeId || "-"} · Chiều: ${row.runtime?.direction || "-"}</div>
         <div class="small">Xuất bến: ${row.departureAt ? new Date(row.departureAt).toLocaleString("vi-VN") : "-"}</div>
-        <div class="small">${row.gpsStatus === "lost" ? "Mất GPS" : `Tốc độ: ${row.speed || 0} km/h`} · GPS cuối: ${row.lastSeenAt ? new Date(row.lastSeenAt).toLocaleString("vi-VN") : "Chưa có dữ liệu"}</div>
+        <div class="small">${row.gps?.status === "lost" ? "Mất GPS" : `Tốc độ: ${row.gps?.speed || 0} km/h`} · GPS cuối: ${row.lastSeenAt ? new Date(row.lastSeenAt).toLocaleString("vi-VN") : "Chưa có dữ liệu"}</div>
       </div>
     `).join("") : '<div class="empty-state">Chưa có vé lệnh đang hoạt động</div>';
     document.querySelectorAll("[data-monitoring-order]").forEach((item) => {
       item.addEventListener("click", () => {
-        const row = rows.find((entry) => entry.dispatchOrderId === item.dataset.monitoringOrder);
+        const row = rows.find((entry) => String(entry.dispatchOrderId || entry.deviceId) === item.dataset.monitoringOrder);
         document.querySelectorAll("[data-monitoring-order]").forEach((el) => el.classList.remove("table-active"));
         item.classList.add("table-active");
-        if (Number.isFinite(Number(row?.lat)) && Number.isFinite(Number(row?.lon))) {
-          state.map.setView([Number(row.lat), Number(row.lon)], 16);
-          const marker = state.markers.find((entry) => entry.dispatchOrderId === row.dispatchOrderId);
+        if (Number.isFinite(Number(row?.gps?.lat)) && Number.isFinite(Number(row?.gps?.lng))) {
+          state.map.setView([Number(row.gps.lat), Number(row.gps.lng)], 16);
+          const marker = state.markers.find((entry) => String(entry.monitoringKey) === String(row.dispatchOrderId || row.deviceId));
           marker?.openPopup();
         } else {
           state.map.setView([21.0285, 105.8542], 12);

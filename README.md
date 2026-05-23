@@ -46,9 +46,12 @@ MQTT_CLIENT_ID=bus-monitor-local
 
 MQTT_TOPIC_TELEMETRY=bus/+/telemetry
 MQTT_TOPIC_EVENT=bus/+/event
+MQTT_TOPIC_STATUS=bus/+/status
 MQTT_TOPIC_COMMAND_PREFIX=bus
 
 EXPORT_DIR=exports
+PUBLIC_BASE_URL=http://localhost:3000
+DEVICE_UPDATE_TOKEN=
 
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=admin123
@@ -103,6 +106,8 @@ http://localhost:3000
 - `GET /api/routes/export/:routeCode`
 - `GET /api/routes/export/:routeCode?pretty=1`
 - `GET /api/routes/export-all`
+- `GET /api/runtime/manifest`
+- `GET /api/runtime/routes/:routeId`
 
 Response thống nhất:
 
@@ -128,14 +133,16 @@ Quy trình cập nhật route cho ESP32:
    - `manifest.json`
 4. Copy các file JSON vào SD Card của ESP32.
 5. ESP32 đọc route config từ SD Card khi khởi động.
-6. Khi backend gửi `ROUTE_OVERRIDE`, ESP32 chỉ reload file tương ứng từ SD Card.
+6. Khi backend gửi command `SET_ROUTE`, ESP32 chỉ reload file tương ứng từ SD Card.
 7. Backend không gửi route detail qua MQTT.
 
 MQTT chỉ dùng cho:
 
 - Telemetry: `bus/{deviceId}/telemetry`
 - Event: `bus/{deviceId}/event`
-- Command nhẹ: `bus/{deviceId}/command`
+- Status: `bus/{deviceId}/status`
+- Command nhẹ: `bus/{deviceId}/cmd`
+- Update notification: `bus/{deviceId}/update`
 
 Các message đã loại bỏ khỏi kiến trúc:
 
@@ -155,21 +162,24 @@ Ví dụ:
 
 ```json
 {
-  "version": 5,
-  "routeCode": "DEMO02",
-  "displayName": "DEMO 02",
-  "outbound": [
+  "routeId": "DEMO02",
+  "version": "5",
+  "up": [
     {
+      "index": 1,
       "stopCode": "HBS0046",
       "name": "401 Co Nhue",
       "lat": 21.06692,
-      "lon": 105.775834,
+      "lng": 105.775834,
       "terminal": true,
       "audio": "HBS0046"
     }
   ],
-  "inbound": []
+  "down": [],
+  "updatedAt": 1716460000
 }
 ```
+
+Schema chinh thuc nam tai `docs/runtime-json-contract.md`.
 
 File export không chứa Mongo ObjectId, `_id`, `__v`, timestamp, metadata hoặc field dư thừa.
