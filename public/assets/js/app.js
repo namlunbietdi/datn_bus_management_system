@@ -79,10 +79,9 @@ const crud = {
     title: "Quản lý thiết bị giám sát hành trình",
     endpoint: "/api/devices",
     icon: "bi-cpu",
-    search: "Mã thiết bị, IMEI",
+    search: "Mã thiết bị",
     columns: [
       ["deviceId", "Mã thiết bị"],
-      ["imei", "IMEI"],
       ["activeVehicle.plateNumber", "Xe gắn"],
       ["installedAt", "Ngày lắp"],
       ["expiredAt", "Hạn sử dụng"],
@@ -91,7 +90,6 @@ const crud = {
     ],
     fields: [
       ["deviceId", "Mã thiết bị", "text", true],
-      ["imei", "IMEI hoặc Device ID", "text"],
       ["installedAt", "Ngày lắp đặt", "date"],
       ["expiredAt", "Hạn sử dụng", "date"],
       ["nextMaintenanceAt", "Kỳ bảo trì tiếp theo", "date"],
@@ -110,19 +108,20 @@ const crud = {
       ["lat", "Lat"],
       ["lon", "Lon"],
       ["address", "Địa chỉ"],
-      ["audio", "Audio"],
       ["terminal", "Terminal"]
     ],
     fields: [
-      ["stopCode", "Mã điểm dừng", "text", true],
+      ["stopCode", "Mã điểm dừng", "text", true, { readonly: true }],
       ["name", "Tên điểm dừng", "text", true],
-      ["lat", "Latitude", "number", true],
-      ["lon", "Longitude", "number", true],
+      ["lat", "Latitude", "number", true, { step: "any" }],
+      ["lon", "Longitude", "number", true, { step: "any" }],
       ["address", "Địa chỉ", "text"],
-      ["audio", "Audio code", "text"],
       ["terminal", "Terminal", "checkbox"]
     ],
-    map: "stops"
+    extraToolbar: '<button class="btn btn-outline-primary" type="button" id="exportStopsTemplate"><i class="bi bi-download"></i> CSV mau</button>',
+    map: "stops",
+    afterOpen: prepareStopModal,
+    afterShown: initStopLocationPicker
   },
   employees: {
     title: "Quản lý nhân sự",
@@ -169,6 +168,7 @@ const crud = {
 };
 
 const root = document.getElementById("appRoot");
+const HANOI_CENTER = [21.0285, 105.8542];
 
 function canOpen(module) {
   return module.roles.includes(state.user?.role);
@@ -199,6 +199,16 @@ function valueOf(item, path) {
   if (typeof value === "boolean") return value ? "Có" : "Không";
   if (typeof value === "string" && value.match(/^\d{4}-\d{2}-\d{2}T/)) return new Date(value).toLocaleString("vi-VN");
   return value ?? "";
+}
+
+function formatDateTime(value) {
+  return value ? new Date(value).toLocaleString("vi-VN") : "";
+}
+
+function formatFare(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return "";
+  return `${new Intl.NumberFormat("vi-VN", { maximumFractionDigits: 0 }).format(amount)} VND`;
 }
 
 function statusBadge(value) {
@@ -344,6 +354,92 @@ function drawStopsMap(key, elementId, stops, options = {}) {
 
   const bounds = L.latLngBounds(points.map((stop) => [stop.lat, stop.lon]));
   map.fitBounds(bounds.pad(0.18), { maxZoom: options.maxZoom || 16 });
+}
+
+function readCoordinate(name) {
+  const raw = document.querySelector(`#entityFields input[name="${name}"]`)?.value.trim();
+  if (!raw) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+}
+
+function stopLocationInputs() {
+  return {
+    lat: document.querySelector('#entityFields input[name="lat"]'),
+    lon: document.querySelector('#entityFields input[name="lon"]')
+  };
+}
+
+function stopLocationFromForm() {
+  const lat = readCoordinate("lat");
+  const lon = readCoordinate("lon");
+  if (lat === null || lon === null) return null;
+  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
+  return { lat, lon };
+}
+
+function setStopLocationInputs(lat, lon) {
+  const inputs = stopLocationInputs();
+  if (!inputs.lat || !inputs.lon) return;
+  inputs.lat.value = Number(lat).toFixed(6);
+  inputs.lon.value = Number(lon).toFixed(6);
+}
+
+function updateStopLocationMarker() {
+  const map = state.maps.stopLocation;
+  const location = stopLocationFromForm();
+  removeLayerSafely("stopLocationMarker");
+  if (!map || !location) return;
+  const layer = L.layerGroup().addTo(map);
+  state.mapLayers.stopLocationMarker = layer;
+  L.marker([location.lat, location.lon]).addTo(layer);
+  map.setView([location.lat, location.lon], Math.max(map.getZoom(), 15));
+}
+
+function addStopLocationPicker() {
+  const fields = document.getElementById("entityFields");
+  fields.insertAdjacentHTML("beforeend", `
+    <div class="col-12">
+      <label class="form-label">Chọn vị trí trên bản đồ</label>
+      <div class="map-shell stop-location-map"><div id="stopLocationMap" class="h-100"></div></div>
+      <div class="form-text">Click trên bản đồ để tự động điền Latitude và Longitude.</div>
+    </div>
+  `);
+}
+
+async function fillNextStopCode(item) {
+  if (item?._id) return;
+  const input = document.querySelector('#entityFields input[name="stopCode"]');
+  if (!input || input.value) return;
+  const data = await api("/api/stops/next-code");
+  input.value = data.stopCode || "";
+}
+
+function prepareStopModal(item) {
+  addStopLocationPicker();
+  fillNextStopCode(item).catch((error) => toast(error.message, "danger"));
+}
+
+function initStopLocationPicker() {
+  const map = ensureMap("stopLocation", "stopLocationMap", 13);
+  if (!map) return;
+  const current = stopLocationFromForm();
+  if (current) {
+    map.setView([current.lat, current.lon], 15);
+  } else {
+    map.setView(HANOI_CENTER, 13);
+  }
+  map.invalidateSize();
+  updateStopLocationMarker();
+  map.off("click");
+  map.on("click", (event) => {
+    setStopLocationInputs(event.latlng.lat, event.latlng.lng);
+    updateStopLocationMarker();
+  });
+  const inputs = stopLocationInputs();
+  const updateFromInput = () => updateStopLocationMarker();
+  inputs.lat?.addEventListener("input", updateFromInput);
+  inputs.lon?.addEventListener("input", updateFromInput);
 }
 
 function directionStops(routeDetail, direction) {
@@ -526,6 +622,11 @@ async function renderDashboard() {
 function modalField(field, item = {}) {
   const [name, label, type, required, options] = field;
   const value = item[name] && typeof item[name] === "object" ? item[name]._id : item[name];
+  const attrs = [
+    type === "number" && options?.step ? `step="${options.step}"` : "",
+    options?.readonly ? "readonly" : ""
+  ].filter(Boolean).join(" ");
+  const inputAttrs = attrs ? ` ${attrs}` : "";
   if (type === "select") {
     return `<div class="col-12 col-md-6"><label class="form-label">${label}</label><select class="form-select" name="${name}" ${required ? "required" : ""}>
       <option value="">Chọn</option>${options.map((option) => {
@@ -543,7 +644,7 @@ function modalField(field, item = {}) {
     </div></div>`;
   }
   const formatted = type === "date" && value ? String(value).slice(0, 10) : value ?? "";
-  return `<div class="col-12 col-md-6"><label class="form-label">${label}</label><input class="form-control" name="${name}" type="${type}" value="${formatted}" ${required ? "required" : ""}></div>`;
+  return `<div class="col-12 col-md-6"><label class="form-label">${label}</label><input class="form-control" name="${name}" type="${type}" value="${formatted}"${inputAttrs} ${required ? "required" : ""}></div>`;
 }
 
 async function openEntityModal(config, item = null) {
@@ -552,6 +653,9 @@ async function openEntityModal(config, item = null) {
   document.getElementById("entityModalTitle").textContent = item ? `Sửa ${config.title}` : `Thêm mới ${config.title}`;
   document.getElementById("entityFields").innerHTML = config.fields.map((field) => modalField(field, item || {})).join("");
   if (config.afterOpen) config.afterOpen(item || {});
+  if (config.afterShown) {
+    document.getElementById("entityModal").addEventListener("shown.bs.modal", () => config.afterShown(item || {}), { once: true });
+  }
   state.modal.show();
 }
 
@@ -718,6 +822,20 @@ async function loadVehicleTypeOptions(config) {
   };
 }
 
+async function loadTerminalStopOptions(config) {
+  const data = await api("/api/stops?terminal=true&limit=500");
+  const options = (data.items || [])
+    .filter((item) => item.terminal)
+    .map((item) => ({
+      value: item.name || item.stopCode,
+      label: `${item.stopCode} - ${item.name || ""}`
+    }));
+  for (const fieldName of ["startPoint", "endPoint"]) {
+    const field = config.fields.find((item) => item[0] === fieldName);
+    if (field) field[4] = options;
+  }
+}
+
 function openProfileModal() {
   state.accountMode = "profile";
   document.getElementById("accountModalTitle").textContent = "Thông tin cá nhân";
@@ -861,6 +979,7 @@ async function renderCrud(key) {
         <div class="d-flex flex-wrap gap-2 justify-content-end">
           ${config.backLink || ""}
           ${config.extraToolbar || ""}
+          ${key === "stops" && canMutate ? `<button class="btn btn-outline-primary" type="button" id="importStopsCsv"><i class="bi bi-upload"></i> Import CSV</button><input class="d-none" id="stopsCsvInput" type="file" accept=".csv,text/csv">` : ""}
           ${canMutate ? `<button class="btn btn-primary" id="addBtn"><i class="bi bi-plus-lg"></i> Thêm mới</button>` : ""}
         </div>
       </div>
@@ -925,6 +1044,28 @@ async function renderCrud(key) {
   document.getElementById("searchInput").addEventListener("input", () => load().catch((error) => toast(error.message, "danger")));
   document.getElementById("statusFilter").addEventListener("change", () => load().catch((error) => toast(error.message, "danger")));
   document.getElementById("addBtn")?.addEventListener("click", () => openEntityModal(config).catch((error) => toast(error.message, "danger")));
+  if (key === "stops") {
+    document.getElementById("exportStopsTemplate")?.addEventListener("click", () => {
+      window.location.href = "/api/stops/import-template";
+    });
+    document.getElementById("importStopsCsv")?.addEventListener("click", () => document.getElementById("stopsCsvInput")?.click());
+    document.getElementById("stopsCsvInput")?.addEventListener("change", async (event) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      try {
+        const csv = await file.text();
+        const result = await api("/api/stops/import-csv", {
+          method: "POST",
+          body: JSON.stringify({ csv })
+        });
+        toast(`Da import ${result.total} diem dung: tao moi ${result.created}, cap nhat ${result.updated}`);
+        event.target.value = "";
+        await load();
+      } catch (error) {
+        toast(error.message, "danger");
+      }
+    });
+  }
   await load();
 }
 
@@ -962,13 +1103,14 @@ async function renderRoutes() {
     fields: [
       ["routeCode", "Route code", "text", true],
       ["displayName", "Tên hiển thị", "text", true],
-      ["startPoint", "Điểm đầu", "text"],
-      ["endPoint", "Điểm cuối", "text"],
+      ["startPoint", "Điểm đầu", "select", false, []],
+      ["endPoint", "Điểm cuối", "select", false, []],
       ["operatingTime", "Thời gian hoạt động", "text"],
       ["frequency", "Tần suất", "text"],
-      ["version", "Version", "number"],
+      ["fare", "Giá vé", "number"],
       ["status", "Trạng thái", "select", false, ["active", "inactive"]]
-    ]
+    ],
+    prepareFields: loadTerminalStopOptions
   };
 
   const download = (url) => {
@@ -1105,16 +1247,15 @@ async function renderRoutes() {
       return;
     }
     document.getElementById("tableHost").innerHTML = `<table class="table table-hover">
-      <thead><tr><th>Route code</th><th>Tên tuyến</th><th>Điểm đầu</th><th>Điểm cuối</th><th>Version</th><th>GeoJSON</th><th>Outbound</th><th>Inbound</th><th>Trạng thái</th><th class="text-end">Thao tác</th></tr></thead>
+      <thead><tr><th>Route code</th><th>Tên tuyến</th><th>Điểm đầu</th><th>Điểm cuối</th><th>Giá vé</th><th>Thời gian tạo</th><th>Lần chỉnh sửa gần nhất</th><th>GeoJSON</th><th>Outbound</th><th>Inbound</th><th>Trạng thái</th><th class="text-end">Thao tác</th></tr></thead>
       <tbody>${rows.map((row) => `
         <tr class="clickable-row" data-route-id="${row._id}">
           <td><strong>${row.routeCode}</strong></td><td>${row.displayName}</td><td>${row.startPoint || ""}</td><td>${row.endPoint || ""}</td>
-          <td><span class="badge badge-soft">${row.version}</span></td><td><span class="badge ${row.hasOutboundGeoJson ? "text-bg-success" : "text-bg-secondary"}">Đi</span> <span class="badge ${row.hasInboundGeoJson ? "text-bg-success" : "text-bg-secondary"}">Về</span></td><td>${row.outboundCount}</td><td>${row.inboundCount}</td><td>${statusBadge(row.status)}</td>
+          <td>${formatFare(row.fare)}</td><td>${formatDateTime(row.createdAt)}</td><td>${formatDateTime(row.updatedAt)}</td><td><span class="badge ${row.hasOutboundGeoJson ? "text-bg-success" : "text-bg-secondary"}">Đi</span> <span class="badge ${row.hasInboundGeoJson ? "text-bg-success" : "text-bg-secondary"}">Về</span></td><td>${row.outboundCount}</td><td>${row.inboundCount}</td><td>${statusBadge(row.status)}</td>
           <td class="text-end">
             <button class="btn btn-sm btn-outline-primary" data-export="${row.routeCode}"><i class="bi bi-download"></i> JSON</button>
             <button class="btn btn-sm btn-outline-primary" data-geojson="${row._id}"><i class="bi bi-map"></i> GeoJSON</button>
             ${canMutate ? `<button class="btn btn-sm btn-outline-secondary" data-sort-stops="${row.routeCode}"><i class="bi bi-list-ol"></i> Sắp xếp điểm dừng</button>
-            <button class="btn btn-sm btn-outline-primary" data-version="${row._id}"><i class="bi bi-arrow-up-circle"></i></button>
             <button class="btn btn-sm btn-outline-primary" data-edit="${row._id}"><i class="bi bi-pencil"></i></button>
             <button class="btn btn-sm btn-outline-danger" data-delete="${row._id}"><i class="bi bi-trash"></i></button>` : ""}
           </td>
@@ -1126,12 +1267,7 @@ async function renderRoutes() {
       openRouteGeoJsonModal(rows.find((row) => row._id === button.dataset.geojson)).catch((error) => toast(error.message, "danger"));
     }));
     document.querySelectorAll("[data-sort-stops]").forEach((button) => button.addEventListener("click", () => openDirectionSorter(rows.find((row) => row.routeCode === button.dataset.sortStops), "outbound").catch((error) => toast(error.message, "danger"))));
-    document.querySelectorAll("[data-version]").forEach((button) => button.addEventListener("click", async () => {
-      await api(`/api/routes/${button.dataset.version}/increase-version`, { method: "PUT", body: "{}" });
-      toast("Đã tăng version");
-      load().catch((error) => toast(error.message, "danger"));
-    }));
-    document.querySelectorAll("[data-edit]").forEach((button) => button.addEventListener("click", () => openEntityModal(routeConfig, rows.find((row) => row._id === button.dataset.edit))));
+    document.querySelectorAll("[data-edit]").forEach((button) => button.addEventListener("click", () => openEntityModal(routeConfig, rows.find((row) => row._id === button.dataset.edit)).catch((error) => toast(error.message, "danger"))));
     document.querySelectorAll("[data-delete]").forEach((button) => button.addEventListener("click", async () => {
       if (!confirm("Xóa tuyến này?")) return;
       await api(`/api/routes/${button.dataset.delete}`, { method: "DELETE" });
@@ -1157,7 +1293,7 @@ async function renderRoutes() {
   };
 
   document.getElementById("exportAllBtn").addEventListener("click", () => download("/api/routes/export-all"));
-  document.getElementById("addRouteBtn")?.addEventListener("click", () => openEntityModal(routeConfig));
+  document.getElementById("addRouteBtn")?.addEventListener("click", () => openEntityModal(routeConfig).catch((error) => toast(error.message, "danger")));
   document.getElementById("searchInput").addEventListener("input", () => load().catch((error) => toast(error.message, "danger")));
   await load();
 }

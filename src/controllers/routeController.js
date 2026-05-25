@@ -7,6 +7,38 @@ import { AppError } from "../utils/errors.js";
 import { exportAllRoutes, exportRoute } from "../services/routeExportService.js";
 import { logActivity } from "../services/activityService.js";
 
+const routeWritableFields = ["routeCode", "displayName", "startPoint", "endPoint", "operatingTime", "frequency", "fare", "status"];
+
+async function routePayload(body = {}) {
+  const payload = {};
+  for (const field of routeWritableFields) {
+    if (Object.hasOwn(body, field)) payload[field] = body[field];
+  }
+
+  if (Object.hasOwn(payload, "fare")) {
+    if (payload.fare === "" || payload.fare === null) {
+      delete payload.fare;
+    } else {
+      const fare = Number(payload.fare);
+      if (!Number.isFinite(fare) || fare < 0) throw new AppError("Giá vé không hợp lệ", 400);
+      payload.fare = fare;
+    }
+  }
+
+  for (const field of ["startPoint", "endPoint"]) {
+    const value = String(payload[field] || "").trim();
+    if (!value) continue;
+    const stop = await Stop.findOne({
+      terminal: true,
+      $or: [{ stopCode: value }, { name: value }]
+    }).select("stopCode name").lean();
+    if (!stop) throw new AppError("Điểm đầu/cuối phải là điểm dừng terminal", 400);
+    payload[field] = stop.name || stop.stopCode;
+  }
+
+  return payload;
+}
+
 export async function listRoutes(req, res) {
   const page = Math.max(Number(req.query.page || 1), 1);
   const limit = Math.min(Math.max(Number(req.query.limit || 20), 1), 100);
@@ -51,13 +83,13 @@ export async function getRoute(req, res) {
 }
 
 export async function createRoute(req, res) {
-  const route = await Route.create(req.body);
+  const route = await Route.create(await routePayload(req.body));
   await logActivity({ user: req.user, action: "create", module: "Route", targetId: route._id.toString() });
   ok(res, route, 201);
 }
 
 export async function updateRoute(req, res) {
-  const route = await Route.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
+  const route = await Route.findByIdAndUpdate(req.params.id, await routePayload(req.body), { new: true, runValidators: true });
   if (!route) throw new AppError("Route not found", 404);
   await logActivity({ user: req.user, action: "update", module: "Route", targetId: route._id.toString() });
   ok(res, route);
@@ -97,6 +129,8 @@ export async function updateDirection(req, res) {
     { route: route._id, routeCode: route.routeCode, direction, stops: ordered, status: "active" },
     { upsert: true, new: true, runValidators: true }
   );
+  route.updatedAt = new Date();
+  await route.save();
   await logActivity({ user: req.user, action: "update_direction", module: "Route", targetId: route._id.toString() });
   ok(res, routeDirection);
 }

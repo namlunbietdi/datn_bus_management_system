@@ -41,10 +41,11 @@ const stops = [
   ["HBS0051", "Hoan Kiem", 21.0285, 105.8542, "Hoan Kiem"]
 ];
 
+const terminalStopCodes = new Set(["HBS0046", "HBS0049", "HBS0051"]);
 for (const [stopCode, name, lat, lon, address] of stops) {
   await Stop.findOneAndUpdate(
     { stopCode },
-    { stopCode, name, lat, lon, address, audio: stopCode },
+    { stopCode, name, lat, lon, address, audio: stopCode, terminal: terminalStopCodes.has(stopCode) },
     { upsert: true }
   );
 }
@@ -53,14 +54,14 @@ const stopDocs = await Stop.find({ stopCode: { $in: stops.map((item) => item[0])
 const byCode = new Map(stopDocs.map((stop) => [stop.stopCode, stop]));
 
 const routes = [
-  ["DEMO01", "DEMO 01", "Co Nhue", "Hoan Kiem", "05:00 - 22:00", "10 phut", 1],
-  ["DEMO02", "DEMO 02", "Cau Giay", "Hoan Kiem", "05:15 - 21:30", "12 phut", 5]
+  ["DEMO01", "DEMO 01", "401 Co Nhue", "Hoan Kiem", "05:00 - 22:00", "10 phut", 7000, 1],
+  ["DEMO02", "DEMO 02", "Cau Giay", "Hoan Kiem", "05:15 - 21:30", "12 phut", 7000, 5]
 ];
 
-for (const [routeCode, displayName, startPoint, endPoint, operatingTime, frequency, version] of routes) {
+for (const [routeCode, displayName, startPoint, endPoint, operatingTime, frequency, fare, version] of routes) {
   const route = await Route.findOneAndUpdate(
     { routeCode },
-    { routeCode, displayName, startPoint, endPoint, operatingTime, frequency, version, status: "active" },
+    { routeCode, displayName, startPoint, endPoint, operatingTime, frequency, fare, version, status: "active" },
     { upsert: true, new: true }
   );
   const outboundCodes = routeCode === "DEMO01"

@@ -277,6 +277,11 @@ body {
   height: 360px;
 }
 
+.stop-location-map {
+  min-height: 280px;
+  height: 280px;
+}
+
 .clickable-row {
   cursor: pointer;
 }

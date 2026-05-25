@@ -8,6 +8,7 @@ const routeSchema = new mongoose.Schema(
     endPoint: String,
     operatingTime: String,
     frequency: String,
+    fare: { type: Number, min: 0 },
     geoJson: { type: mongoose.Schema.Types.Mixed },
     geoJsonName: String,
     geoJsonUpdatedAt: Date,
