@@ -65,6 +65,31 @@ Required fields:
 - `network.mqtt`: boolean
 - `network.signal`: integer
 
+## GPS-only update
+
+Topic:
+
+```text
+bus/{device_id}/gps
+```
+
+Minimal payload:
+
+```json
+{
+  "deviceId": "BUS_01",
+  "timestamp": 1789992220,
+  "lat": 21.0285,
+  "lng": 105.8542,
+  "speed": 18.5,
+  "heading": 90,
+  "sat": 8,
+  "fix": true
+}
+```
+
+The server also accepts the coordinates under `gps.lat` and `gps.lng`. `deviceId` may be omitted when the topic contains the device id.
+
 ## Status
 
 Topic:

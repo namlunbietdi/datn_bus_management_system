@@ -25,13 +25,14 @@ All MQTT topics use this structure:
 
 ```text
 bus/{device_id}/telemetry
+bus/{device_id}/gps
 bus/{device_id}/event
 bus/{device_id}/status
 bus/{device_id}/cmd
 bus/{device_id}/update
 ```
 
-MQTT must not carry full route/runtime files. It only carries telemetry, event, status, command, and update notifications.
+MQTT must not carry full route/runtime files. It only carries telemetry, GPS-only updates, event, status, command, and update notifications.
 
 ## Canonical JSON Contract
 

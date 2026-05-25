@@ -7,6 +7,7 @@ import {
   deleteRoute,
   exportAll,
   exportOne,
+  getGeoJsonByRouteCode,
   getRoute,
   increaseVersion,
   listRoutes,
@@ -20,6 +21,7 @@ router.get("/", requireAuth, asyncHandler(listRoutes));
 router.post("/", requireAuth, adminOnly, asyncHandler(createRoute));
 router.get("/export-all", requireAuth, asyncHandler(exportAll));
 router.get("/export/:routeCode", requireAuth, asyncHandler(exportOne));
+router.get("/code/:routeCode/geojson", requireAuth, asyncHandler(getGeoJsonByRouteCode));
 router.put("/:routeCode/direction", requireAuth, adminOnly, asyncHandler(updateDirection));
 router.put("/:id/increase-version", requireAuth, adminOnly, asyncHandler(increaseVersion));
 router.put("/:id/geojson", requireAuth, adminOnly, asyncHandler(updateGeoJson));

@@ -14,6 +14,10 @@ const state = {
   maps: {},
   mapLayers: {},
   monitoringFullscreen: false,
+  monitoringTimer: null,
+  monitoringSelectedKey: null,
+  monitoringDrawnRouteKey: null,
+  monitoringRouteCache: new Map(),
   monitoringKeyHandler: null,
   monitoringFullscreenHandler: null
 };
@@ -693,6 +697,81 @@ function routeGeoJsonByDirection(routeDetail, direction) {
   };
 }
 
+function monitoringKey(row) {
+  return String(row?.dispatchOrderId || row?.deviceId || "");
+}
+
+function monitoringDirection(row) {
+  const direction = row?.runtime?.direction || row?.planned?.direction;
+  if (direction === "BACKWARD" || direction === "inbound") return "inbound";
+  if (direction === "FORWARD" || direction === "outbound") return "outbound";
+  return "";
+}
+
+function monitoringLatLng(row) {
+  const lat = Number(row?.gps?.lat);
+  const lng = Number(row?.gps?.lng);
+  return Number.isFinite(lat) && Number.isFinite(lng) ? [lat, lng] : null;
+}
+
+function fitMonitoringSelection(routeLayer, row) {
+  const vehiclePoint = monitoringLatLng(row);
+  const routeBounds = routeLayer?.getBounds?.();
+  if (routeBounds?.isValid?.()) {
+    const bounds = L.latLngBounds(routeBounds.getSouthWest(), routeBounds.getNorthEast());
+    if (vehiclePoint) bounds.extend(vehiclePoint);
+    state.map.fitBounds(bounds.pad(0.18), { maxZoom: 16 });
+    return;
+  }
+  if (vehiclePoint) state.map.setView(vehiclePoint, 16);
+}
+
+async function drawMonitoringRoute(row, options = {}) {
+  if (!state.map || !row) return;
+  const routeCode = row.runtime?.routeId || row.planned?.routeId;
+  const direction = monitoringDirection(row);
+  const hint = document.getElementById("monitoringRouteHint");
+  if (!routeCode || !direction) {
+    removeLayerSafely("monitoringRoute");
+    state.monitoringDrawnRouteKey = null;
+    if (hint) hint.textContent = "Chọn xe để hiển thị tuyến";
+    return;
+  }
+
+  const cacheKey = `${routeCode}:${direction}`;
+  if (state.monitoringDrawnRouteKey === cacheKey && state.mapLayers.monitoringRoute) {
+    if (hint) hint.textContent = `${routeCode} - ${direction}`;
+    if (options.fit) fitMonitoringSelection(state.mapLayers.monitoringRoute, row);
+    return;
+  }
+
+  let routeData = state.monitoringRouteCache.get(cacheKey);
+  if (!routeData) {
+    try {
+      routeData = await api(`/api/routes/code/${encodeURIComponent(routeCode)}/geojson?direction=${direction}`);
+      state.monitoringRouteCache.set(cacheKey, routeData);
+    } catch (error) {
+      removeLayerSafely("monitoringRoute");
+      state.monitoringDrawnRouteKey = null;
+      if (hint) hint.textContent = `${routeCode} ${direction === "inbound" ? "chiều về" : "chiều đi"} chưa có GeoJSON`;
+      return;
+    }
+  }
+
+  removeLayerSafely("monitoringRoute");
+  const layer = L.geoJSON(routeData.geoJson, {
+    style: {
+      color: direction === "inbound" ? "#188038" : "#0d6efd",
+      weight: 6,
+      opacity: 0.88
+    }
+  }).addTo(state.map);
+  state.mapLayers.monitoringRoute = layer;
+  state.monitoringDrawnRouteKey = cacheKey;
+  if (hint) hint.textContent = `${routeCode} · ${direction === "inbound" ? "chiều về" : "chiều đi"}`;
+  if (options.fit) fitMonitoringSelection(layer, row);
+}
+
 async function openRouteGeoJsonModal(routeRow) {
   const routeDetail = await api(`/api/routes/${routeRow._id}`);
   state.routeGeoJson = routeDetail;
@@ -1300,6 +1379,12 @@ async function renderRoutes() {
 
 async function renderMonitoring() {
   state.monitoringFullscreen = false;
+  state.monitoringSelectedKey = null;
+  state.monitoringDrawnRouteKey = null;
+  if (state.monitoringTimer) {
+    clearInterval(state.monitoringTimer);
+    state.monitoringTimer = null;
+  }
   if (state.monitoringKeyHandler) {
     document.removeEventListener("keydown", state.monitoringKeyHandler);
     state.monitoringKeyHandler = null;
@@ -1324,6 +1409,8 @@ async function renderMonitoring() {
             <h2 class="h5 m-0">Xe đang hoạt động</h2>
             <button class="btn btn-outline-primary btn-sm" id="refreshBtn" type="button" title="Làm mới"><i class="bi bi-arrow-clockwise"></i></button>
           </div>
+          <div class="small text-secondary mb-1" id="monitoringRouteHint">Chon xe de hien thi tuyen</div>
+          <div class="small text-secondary mb-2" id="monitoringRefreshStatus">Tu dong cap nhat moi 5 giay</div>
           <div id="vehicleList"></div>
         </section>
       </div>
@@ -1380,19 +1467,19 @@ async function renderMonitoring() {
     state.markers.forEach((marker) => marker.remove());
     const rowsWithGps = rows.filter((row) => Number.isFinite(Number(row.gps?.lat)) && Number.isFinite(Number(row.gps?.lng)));
     state.markers = rowsWithGps.map((row) => {
-      const monitoringKey = row.dispatchOrderId || row.deviceId;
+      const key = monitoringKey(row);
       const marker = L.marker([Number(row.gps.lat), Number(row.gps.lng)]).addTo(state.map);
       marker.bindPopup(`<strong>${row.vehiclePlate || row.deviceId}</strong><br>${row.runtime?.routeId || ""} ${row.runtime?.direction || ""}<br>${row.gps?.status === "lost" ? "Vị trí GPS cuối cùng" : `${row.gps?.speed || 0} km/h`}`);
-      marker.monitoringKey = monitoringKey;
+      marker.monitoringKey = key;
       return marker;
     });
-    if (state.markers.length) {
+    if (state.markers.length && !state.monitoringSelectedKey) {
       state.map.fitBounds(L.featureGroup(state.markers).getBounds().pad(0.2));
-    } else {
+    } else if (!state.monitoringSelectedKey) {
       state.map.setView([21.0285, 105.8542], 12);
     }
     document.getElementById("vehicleList").innerHTML = rows.length ? rows.map((row) => `
-      <div class="border-bottom py-3 clickable-row" data-monitoring-order="${row.dispatchOrderId || row.deviceId}">
+      <div class="border-bottom py-3 clickable-row ${state.monitoringSelectedKey === monitoringKey(row) ? "table-active" : ""}" data-monitoring-order="${monitoringKey(row)}">
         <div class="small text-secondary">Runtime: ${row.runtime?.routeId || "-"} ${row.runtime?.direction || ""} - Source: ${row.stateSource === "esp32" ? "ESP32" : "dispatch"}</div>
         <div class="small">${Number.isInteger(row.runtime?.currentStop) ? `Current stop: ${row.runtime.currentStop}` : ""}${Number.isInteger(row.runtime?.nextStop) ? ` - Next: ${row.runtime.nextStop}` : ""}</div>
         <div class="d-flex justify-content-between gap-2"><strong>${row.vehiclePlate || "Chưa gắn xe"}</strong>${statusBadge(row.status)}</div>
@@ -1402,13 +1489,16 @@ async function renderMonitoring() {
       </div>
     `).join("") : '<div class="empty-state">Chưa có vé lệnh đang hoạt động</div>';
     document.querySelectorAll("[data-monitoring-order]").forEach((item) => {
-      item.addEventListener("click", () => {
-        const row = rows.find((entry) => String(entry.dispatchOrderId || entry.deviceId) === item.dataset.monitoringOrder);
+      item.addEventListener("click", async () => {
+        const row = rows.find((entry) => monitoringKey(entry) === item.dataset.monitoringOrder);
+        state.monitoringSelectedKey = item.dataset.monitoringOrder;
         document.querySelectorAll("[data-monitoring-order]").forEach((el) => el.classList.remove("table-active"));
         item.classList.add("table-active");
-        if (Number.isFinite(Number(row?.gps?.lat)) && Number.isFinite(Number(row?.gps?.lng))) {
-          state.map.setView([Number(row.gps.lat), Number(row.gps.lng)], 16);
-          const marker = state.markers.find((entry) => String(entry.monitoringKey) === String(row.dispatchOrderId || row.deviceId));
+        await drawMonitoringRoute(row, { fit: true });
+        const point = monitoringLatLng(row);
+        if (point) {
+          if (!state.mapLayers.monitoringRoute) state.map.setView(point, 16);
+          const marker = state.markers.find((entry) => String(entry.monitoringKey) === monitoringKey(row));
           marker?.openPopup();
         } else {
           state.map.setView([21.0285, 105.8542], 12);
@@ -1416,9 +1506,25 @@ async function renderMonitoring() {
         }
       });
     });
+    const selectedRow = rows.find((row) => monitoringKey(row) === state.monitoringSelectedKey);
+    if (state.monitoringSelectedKey && selectedRow) await drawMonitoringRoute(selectedRow);
+    if (state.monitoringSelectedKey && !selectedRow) {
+      state.monitoringSelectedKey = null;
+      state.monitoringDrawnRouteKey = null;
+      removeLayerSafely("monitoringRoute");
+    }
+    const status = document.getElementById("monitoringRefreshStatus");
+    if (status) status.textContent = `Cap nhat luc ${new Date().toLocaleTimeString("vi-VN")}`;
   };
 
   document.getElementById("refreshBtn").addEventListener("click", () => load().catch((error) => toast(error.message, "danger")));
+  state.monitoringTimer = setInterval(() => {
+    if (state.route !== "monitoring") return;
+    load().catch((error) => {
+      const status = document.getElementById("monitoringRefreshStatus");
+      if (status) status.textContent = `Loi cap nhat: ${error.message}`;
+    });
+  }, 5000);
   document.getElementById("monitoringFullscreenBtn").addEventListener("click", () => {
     setMonitoringFullscreen(!state.monitoringFullscreen);
   });
@@ -1572,6 +1678,12 @@ async function route() {
   renderNav();
   document.body.classList.remove("monitoring-fullscreen-open");
   state.monitoringFullscreen = false;
+  state.monitoringSelectedKey = null;
+  state.monitoringDrawnRouteKey = null;
+  if (state.monitoringTimer) {
+    clearInterval(state.monitoringTimer);
+    state.monitoringTimer = null;
+  }
   if (state.monitoringKeyHandler) {
     document.removeEventListener("keydown", state.monitoringKeyHandler);
     state.monitoringKeyHandler = null;

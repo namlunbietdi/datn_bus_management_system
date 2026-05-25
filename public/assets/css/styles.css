@@ -286,6 +286,10 @@ body {
   cursor: pointer;
 }
 
+.clickable-row.table-active {
+  background: #eaf4ff;
+}
+
 .clickable-row.table-active td {
   background: #eaf4ff;
 }

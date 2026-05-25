@@ -55,6 +55,26 @@ function topicDeviceId(topic) {
   return parts.length >= 3 ? parts[1] : null;
 }
 
+function isObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function numberOrUndefined(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : undefined;
+}
+
+function dateFromPayloadTimestamp(value) {
+  if (Number.isInteger(value)) {
+    return new Date(value > 1_000_000_000_000 ? value : value * 1000);
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  return new Date();
+}
+
 function rejectInvalid(kind, topic, errors) {
   console.warn(`Invalid ${kind} payload rejected on ${topic}: ${errors.join("; ")}`);
 }
@@ -84,6 +104,45 @@ function runtimeFieldsFromTelemetry(payload) {
 
 function compactObject(value) {
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined));
+}
+
+function gpsPayloadFromMessage(topic, payload) {
+  if (!isObject(payload)) return { errors: ["payload must be an object"] };
+
+  const topicId = topicDeviceId(topic);
+  const deviceId = payload.deviceId || topicId;
+  const topicErrors = payload.deviceId ? assertTopicDevice("gps", topic, payload) : [];
+  if (!deviceId || topicErrors.length) {
+    return { errors: topicErrors.length ? topicErrors : ["topic device id is missing"] };
+  }
+
+  const gps = isObject(payload.gps) ? payload.gps : payload;
+  const lat = numberOrUndefined(gps.lat ?? gps.latitude);
+  const lon = numberOrUndefined(gps.lng ?? gps.lon ?? gps.longitude);
+  const speed = numberOrUndefined(gps.speed) ?? 0;
+  const heading = numberOrUndefined(gps.heading ?? gps.course) ?? 0;
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return { errors: ["gps.lat/lng or lat/lng must be finite numbers"] };
+  }
+
+  const runtime = isObject(payload.runtime) ? payload.runtime : payload;
+  const network = isObject(payload.network) ? payload.network : payload;
+  return {
+    value: compactObject({
+      deviceId,
+      timestamp: dateFromPayloadTimestamp(payload.timestamp ?? gps.timestamp),
+      routeCode: runtime.routeId || runtime.routeCode,
+      direction: directionToDb(runtime.direction) || runtime.direction,
+      lat,
+      lon,
+      speed,
+      heading,
+      gpsSat: Number.isInteger(gps.sat) ? gps.sat : numberOrUndefined(gps.sat ?? gps.satellites),
+      gpsFix: typeof gps.fix === "boolean" ? gps.fix : (typeof gps.gpsFix === "boolean" ? gps.gpsFix : true),
+      networkMqtt: typeof network.mqtt === "boolean" ? network.mqtt : (typeof network.mqttConnected === "boolean" ? network.mqttConnected : undefined),
+      networkSignal: Number.isInteger(network.signal) ? network.signal : numberOrUndefined(network.signal)
+    })
+  };
 }
 
 async function handleTelemetry(topic, message) {
@@ -127,6 +186,49 @@ async function handleTelemetry(topic, message) {
   );
 
   await Device.findOneAndUpdate({ deviceId }, { status: "online", lastSeenAt: timestamp });
+}
+
+async function handleGps(topic, message) {
+  const payload = parseMessage(message);
+  const normalized = gpsPayloadFromMessage(topic, payload);
+  if (normalized.errors) {
+    rejectInvalid("gps", topic, normalized.errors);
+    return;
+  }
+
+  const gps = normalized.value;
+  await LocationLog.create({
+    deviceId: gps.deviceId,
+    routeCode: gps.routeCode,
+    direction: gps.direction,
+    lat: gps.lat,
+    lon: gps.lon,
+    speed: gps.speed,
+    heading: gps.heading,
+    timestamp: gps.timestamp
+  });
+
+  await DeviceLastState.findOneAndUpdate(
+    { deviceId: gps.deviceId },
+    compactObject({
+      deviceId: gps.deviceId,
+      routeCode: gps.routeCode,
+      direction: gps.direction,
+      lat: gps.lat,
+      lon: gps.lon,
+      speed: gps.speed,
+      heading: gps.heading,
+      status: gps.speed > 1 ? "running" : "stopped",
+      gpsSat: gps.gpsSat,
+      gpsFix: gps.gpsFix,
+      networkMqtt: gps.networkMqtt,
+      networkSignal: gps.networkSignal,
+      lastSeenAt: gps.timestamp
+    }),
+    { upsert: true, new: true }
+  );
+
+  await Device.findOneAndUpdate({ deviceId: gps.deviceId }, { status: "online", lastSeenAt: gps.timestamp });
 }
 
 async function handleStatus(topic, message) {
@@ -219,6 +321,7 @@ export function connectMqtt() {
     connected = true;
     console.log("MQTT connected to HiveMQ");
     client.subscribe(process.env.MQTT_TOPIC_TELEMETRY || "bus/+/telemetry");
+    client.subscribe(process.env.MQTT_TOPIC_GPS || "bus/+/gps");
     client.subscribe(process.env.MQTT_TOPIC_EVENT || "bus/+/event");
     client.subscribe(process.env.MQTT_TOPIC_STATUS || "bus/+/status");
   });
@@ -232,6 +335,10 @@ export function connectMqtt() {
   client.on("message", (topic, message) => {
     if (topic.endsWith("/telemetry")) {
       handleTelemetry(topic, message).catch((error) => console.warn(`Telemetry handling failed: ${error.message}`));
+      return;
+    }
+    if (topic.endsWith("/gps")) {
+      handleGps(topic, message).catch((error) => console.warn(`GPS handling failed: ${error.message}`));
       return;
     }
     if (topic.endsWith("/event")) {
@@ -253,6 +360,7 @@ export function mqttStatus() {
     clientId: process.env.MQTT_CLIENT_ID || null,
     topics: {
       telemetry: process.env.MQTT_TOPIC_TELEMETRY || "bus/+/telemetry",
+      gps: process.env.MQTT_TOPIC_GPS || "bus/+/gps",
       event: process.env.MQTT_TOPIC_EVENT || "bus/+/event",
       status: process.env.MQTT_TOPIC_STATUS || "bus/+/status",
       cmd: `${topicPrefix()}/{deviceId}/cmd`,

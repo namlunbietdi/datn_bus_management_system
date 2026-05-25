@@ -45,6 +45,7 @@ MQTT_PASSWORD=your_password
 MQTT_CLIENT_ID=bus-monitor-local
 
 MQTT_TOPIC_TELEMETRY=bus/+/telemetry
+MQTT_TOPIC_GPS=bus/+/gps
 MQTT_TOPIC_EVENT=bus/+/event
 MQTT_TOPIC_STATUS=bus/+/status
 MQTT_TOPIC_COMMAND_PREFIX=bus
@@ -139,6 +140,7 @@ Quy trình cập nhật route cho ESP32:
 MQTT chỉ dùng cho:
 
 - Telemetry: `bus/{deviceId}/telemetry`
+- GPS-only update: `bus/{deviceId}/gps`
 - Event: `bus/{deviceId}/event`
 - Status: `bus/{deviceId}/status`
 - Command nhẹ: `bus/{deviceId}/cmd`

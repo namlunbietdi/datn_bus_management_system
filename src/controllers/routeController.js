@@ -82,6 +82,46 @@ export async function getRoute(req, res) {
   ok(res, { ...route, directions });
 }
 
+function normalizeDirection(direction) {
+  if (direction === "BACKWARD" || direction === "inbound") return "inbound";
+  if (direction === "FORWARD" || direction === "outbound") return "outbound";
+  return null;
+}
+
+function routeGeoJsonByDirection(route, direction) {
+  if (direction === "inbound") {
+    return {
+      direction,
+      geoJson: route.inboundGeoJson,
+      name: route.inboundGeoJsonName,
+      updatedAt: route.inboundGeoJsonUpdatedAt
+    };
+  }
+  return {
+    direction: "outbound",
+    geoJson: route.outboundGeoJson || route.geoJson,
+    name: route.outboundGeoJsonName || route.geoJsonName,
+    updatedAt: route.outboundGeoJsonUpdatedAt || route.geoJsonUpdatedAt
+  };
+}
+
+export async function getGeoJsonByRouteCode(req, res) {
+  const direction = normalizeDirection(req.query.direction);
+  if (!direction) throw new AppError("Invalid GeoJSON direction", 400);
+
+  const route = await Route.findOne({ routeCode: req.params.routeCode }).lean();
+  if (!route) throw new AppError("Route not found", 404);
+
+  const result = routeGeoJsonByDirection(route, direction);
+  if (!result.geoJson) throw new AppError("GeoJSON route direction not found", 404);
+
+  ok(res, {
+    routeCode: route.routeCode,
+    displayName: route.displayName,
+    ...result
+  });
+}
+
 export async function createRoute(req, res) {
   const route = await Route.create(await routePayload(req.body));
   await logActivity({ user: req.user, action: "create", module: "Route", targetId: route._id.toString() });
