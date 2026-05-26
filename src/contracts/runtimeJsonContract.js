@@ -8,7 +8,9 @@ export const EVENT_TYPES = [
   "ROUTE_RELOADED",
   "REVERSE_ROUTE",
   "STOP_TRIGGERED",
-  "CRASH_RECOVERY"
+  "CRASH_RECOVERY",
+  "CONFIG_REQUEST",
+  "ROUTE_CONFIG_REQUEST"
 ];
 export const COMMANDS = [
   "NEXT_STOP",
@@ -53,14 +55,21 @@ export function unixToDate(timestamp) {
 }
 
 export function directionToContract(direction) {
-  if (direction === "inbound" || direction === "BACKWARD") return "BACKWARD";
+  const value = String(direction || "").toLowerCase();
+  if (["inbound", "backward", "ve", "down"].includes(value)) return "BACKWARD";
+  if (["outbound", "forward", "di", "up"].includes(value)) return "FORWARD";
   return "FORWARD";
 }
 
 export function directionToDb(direction) {
-  if (direction === "BACKWARD") return "inbound";
-  if (direction === "FORWARD") return "outbound";
+  const value = String(direction || "").toLowerCase();
+  if (["backward", "inbound", "ve", "down"].includes(value)) return "inbound";
+  if (["forward", "outbound", "di", "up"].includes(value)) return "outbound";
   return null;
+}
+
+function isDirectionLike(value) {
+  return directionToDb(value) !== null;
 }
 
 export function validateTelemetry(payload) {
@@ -85,7 +94,7 @@ export function validateTelemetry(payload) {
 
   if (isObject(payload.runtime)) {
     pushRequired(errors, isNonEmptyString(payload.runtime.routeId), "runtime.routeId", "a non-empty string");
-    pushRequired(errors, hasEnum(payload.runtime.direction, DIRECTIONS), "runtime.direction", DIRECTIONS.join("|"));
+    pushRequired(errors, isDirectionLike(payload.runtime.direction), "runtime.direction", "FORWARD|BACKWARD|DI|VE");
     pushRequired(errors, Number.isInteger(payload.runtime.currentStop), "runtime.currentStop", "an integer");
     pushRequired(errors, Number.isInteger(payload.runtime.nextStop), "runtime.nextStop", "an integer");
     pushRequired(errors, hasEnum(payload.runtime.tripState, TRIP_STATES), "runtime.tripState", TRIP_STATES.join("|"));
@@ -122,9 +131,18 @@ export function validateEvent(payload) {
 
   pushRequired(errors, hasEnum(payload.type, EVENT_TYPES), "type", EVENT_TYPES.join("|"));
   pushRequired(errors, isUnixTimestamp(payload.timestamp), "timestamp", "a unix timestamp in seconds");
-  pushRequired(errors, isNonEmptyString(payload.routeId), "routeId", "a non-empty string");
+  if (payload.type === "ROUTE_CONFIG_REQUEST") {
+    pushRequired(errors, isNonEmptyString(payload.routeCode), "routeCode", "a non-empty string");
+    pushRequired(errors, payload.currentVersion === undefined || typeof payload.currentVersion === "string", "currentVersion", "a string when present");
+  } else if (payload.type !== "CONFIG_REQUEST") {
+    pushRequired(errors, isNonEmptyString(payload.routeId), "routeId", "a non-empty string");
+  } else {
+    pushRequired(errors, payload.routeId === undefined || isNonEmptyString(payload.routeId), "routeId", "a string when present");
+  }
   pushRequired(errors, isNonEmptyString(payload.stopCode) || payload.stopCode === undefined, "stopCode", "a string when present");
-  pushRequired(errors, hasEnum(payload.direction, DIRECTIONS), "direction", DIRECTIONS.join("|"));
+  pushRequired(errors, payload.type === "CONFIG_REQUEST" || payload.type === "ROUTE_CONFIG_REQUEST"
+    ? payload.direction === undefined || isDirectionLike(payload.direction)
+    : isDirectionLike(payload.direction), "direction", "FORWARD|BACKWARD|DI|VE");
 
   return result(errors, payload);
 }

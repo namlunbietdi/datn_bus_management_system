@@ -7,9 +7,13 @@ import { ok } from "../utils/apiResponse.js";
 import { AppError } from "../utils/errors.js";
 import { logActivity } from "../services/activityService.js";
 import {
+  publishDispatchAssigned,
+  publishDispatchDirectionChanged,
+  publishDispatchEnded,
+  publishCurrentDispatchState,
   publishLockTrip,
   publishRouteOverride,
-  publishRouteUpdate,
+  publishRouteConfigChunks,
   publishUnlockTrip
 } from "../services/mqttService.js";
 
@@ -54,21 +58,12 @@ async function assignVehicleToDevice({ device, vehicle, routeCode }) {
   await vehicle.save();
 }
 
-function runtimeBaseUrl(req) {
-  return (process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get("host")}`).replace(/\/+$/, "");
-}
-
-function routeUpdatePayload(req, route) {
-  return {
-    routeId: route.routeCode,
-    version: String(route.version || "1.0"),
-    fileName: `route_${route.routeCode}.json`,
-    url: `${runtimeBaseUrl(req)}/api/runtime/routes/${encodeURIComponent(route.routeCode)}`
-  };
-}
-
 function contractDirection(direction) {
   return direction === "inbound" ? "BACKWARD" : "FORWARD";
+}
+
+function routeFare(route) {
+  return String(route.fare ?? route.ticketPrice ?? route.price ?? "");
 }
 
 async function createOrder({ req, device, route, vehicle, commandType, direction, payload, departureAt }) {
@@ -86,10 +81,17 @@ async function createOrder({ req, device, route, vehicle, commandType, direction
   });
 
   try {
+    const dispatchState = await publishDispatchAssigned(device.deviceId, {
+      dispatchId: order._id.toString(),
+      routeCode: route.routeCode,
+      fare: routeFare(route),
+      direction
+    });
+    const routeConfig = await publishRouteConfigChunks(device.deviceId, route.routeCode);
     if (commandType === "ROUTE_OVERRIDE") await publishRouteOverride(device.deviceId, route.routeCode, direction);
-    if (commandType === "ROUTE_VERSION") await publishRouteUpdate(device.deviceId, routeUpdatePayload(req, route));
     if (commandType === "UNLOCK_TRIP") await publishUnlockTrip(device.deviceId, route.routeCode, direction);
     if (commandType === "LOCK_TRIP") await publishLockTrip(device.deviceId, route.routeCode, direction);
+    order.payload = { ...payload, dispatchState: dispatchState.payload, routeConfig };
     order.status = "published";
   } catch (error) {
     order.status = "failed";
@@ -129,13 +131,11 @@ export async function createDispatchOrder(req, res) {
   const { deviceId, routeCode, direction, commandType, vehicleId, departureAt } = req.body;
   if (!deviceId || !routeCode || !commandType) throw new AppError("deviceId, routeCode and commandType are required", 400);
   if (!vehicleId) throw new AppError("vehicleId is required", 400);
-  if (commandType !== "ROUTE_VERSION") assertDirection(direction);
+  assertDirection(direction);
   const device = await assertDevice(deviceId);
   const route = await assertRoute(routeCode);
   const vehicle = await assertVehicle(vehicleId);
-  const payload = commandType === "ROUTE_VERSION"
-    ? { type: "ROUTE_UPDATE_AVAILABLE", ...routeUpdatePayload(req, route) }
-    : { cmd: commandType === "ROUTE_OVERRIDE" ? "SET_ROUTE" : commandType, routeId: routeCode, direction: contractDirection(direction) };
+  const payload = { cmd: commandType === "ROUTE_OVERRIDE" ? "DISPATCH_ASSIGNED" : commandType, routeId: routeCode, direction: contractDirection(direction) };
   const order = await createOrder({ req, device, route, vehicle, commandType, direction, payload, departureAt });
   ok(res, order, 201);
 }
@@ -154,6 +154,16 @@ export async function routeOverride(req, res) {
     payload: { cmd: "SET_ROUTE", routeId: routeCode, direction: contractDirection(direction) }
   });
   ok(res, order, 201);
+}
+
+export async function displayConfig(req, res) {
+  const device = await assertDevice(req.params.deviceId);
+  try {
+    const result = await publishCurrentDispatchState(device.deviceId);
+    ok(res, result);
+  } catch (error) {
+    throw new AppError(error.message, error.message === "MQTT client is not connected" ? 503 : 400);
+  }
 }
 
 export async function returnToDepot(req, res) {
@@ -181,6 +191,16 @@ export async function returnToDepot(req, res) {
     await Vehicle.findByIdAndUpdate(order.vehicle, { $unset: { currentRoute: "" } });
   }
 
+  try {
+    const dispatchState = await publishDispatchEnded(order.deviceId);
+    order.payload = { ...order.payload, dispatchState: dispatchState.payload };
+    await order.save();
+  } catch (error) {
+    order.payload = { ...order.payload, mqttError: error.message };
+    await order.save();
+    console.warn(`DISPATCH_ENDED publish failed for ${order.deviceId}: ${error.message}`);
+  }
+
   await logActivity({
     user: req.user,
     action: "RETURN_TO_DEPOT",
@@ -192,6 +212,84 @@ export async function returnToDepot(req, res) {
   ok(res, order);
 }
 
+export async function changeDirection(req, res) {
+  const { direction } = req.body;
+  assertDirection(direction);
+  const order = await DispatchOrder.findById(req.params.id);
+  if (!order) throw new AppError("Dispatch order not found", 404);
+  if (order.status === "returned") throw new AppError("Dispatch order is already returned", 400);
+  const route = await assertRoute(order.routeCode);
+
+  order.direction = direction;
+  order.payload = {
+    ...order.payload,
+    directionChangedAt: new Date(),
+    direction: contractDirection(direction)
+  };
+
+  try {
+    const dispatchState = await publishDispatchDirectionChanged(order.deviceId, {
+      dispatchId: order._id.toString(),
+      routeCode: order.routeCode,
+      fare: routeFare(route),
+      direction
+    });
+    order.payload = { ...order.payload, dispatchState: dispatchState.payload };
+    order.status = "published";
+  } catch (error) {
+    order.payload = { ...order.payload, mqttError: error.message };
+    await order.save();
+    throw new AppError(error.message, error.message === "MQTT client is not connected" ? 503 : 400);
+  }
+
+  await order.save();
+  await logActivity({
+    user: req.user,
+    action: "DISPATCH_DIRECTION_CHANGED",
+    module: "DispatchOrder",
+    targetId: order._id.toString(),
+    metadata: { deviceId: order.deviceId, routeCode: order.routeCode, direction }
+  });
+  ok(res, order);
+}
+
+export async function deleteDispatchOrder(req, res) {
+  const order = await DispatchOrder.findById(req.params.id);
+  if (!order) throw new AppError("Dispatch order not found", 404);
+  const active = order.status !== "returned";
+  const endedAt = new Date();
+
+  if (active) {
+    const device = await Device.findOne({ deviceId: order.deviceId });
+    if (device) {
+      await DeviceAssignment.updateMany(
+        { device: device._id, status: "active" },
+        { status: "inactive", unassignedAt: endedAt }
+      );
+      device.vehicle = undefined;
+      await device.save();
+    }
+    if (order.vehicle) {
+      await Vehicle.findByIdAndUpdate(order.vehicle, { $unset: { currentRoute: "" } });
+    }
+    try {
+      await publishDispatchEnded(order.deviceId);
+    } catch (error) {
+      console.warn(`DISPATCH_ENDED publish failed for ${order.deviceId}: ${error.message}`);
+    }
+  }
+
+  await DispatchOrder.deleteOne({ _id: order._id });
+  await logActivity({
+    user: req.user,
+    action: "DELETE_DISPATCH_ORDER",
+    module: "DispatchOrder",
+    targetId: order._id.toString(),
+    metadata: { deviceId: order.deviceId, routeCode: order.routeCode, active }
+  });
+  ok(res, { deleted: true, id: order._id.toString() });
+}
+
 export async function routeVersion(req, res) {
   const { routeCode } = req.body;
   const device = await assertDevice(req.params.deviceId);
@@ -201,7 +299,8 @@ export async function routeVersion(req, res) {
     device,
     route,
     commandType: "ROUTE_VERSION",
-    payload: { type: "ROUTE_UPDATE_AVAILABLE", ...routeUpdatePayload(req, route) }
+    direction: req.body.direction || "outbound",
+    payload: { cmd: "DISPATCH_ASSIGNED", routeId: routeCode, direction: contractDirection(req.body.direction || "outbound") }
   });
   ok(res, order, 201);
 }

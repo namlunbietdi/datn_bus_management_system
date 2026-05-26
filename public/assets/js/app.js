@@ -901,6 +901,99 @@ async function loadVehicleTypeOptions(config) {
   };
 }
 
+function displayDirectionValue(direction) {
+  const value = String(direction || "").toLowerCase();
+  if (["ve", "backward", "inbound", "down"].includes(value)) return "VE";
+  if (["di", "forward", "outbound", "up"].includes(value)) return "DI";
+  return direction ? String(direction).toUpperCase() : "DI";
+}
+
+function ensureDisplayConfigModal() {
+  let modal = document.getElementById("displayConfigModal");
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.className = "modal fade";
+    modal.id = "displayConfigModal";
+    modal.tabIndex = -1;
+    modal.setAttribute("aria-hidden", "true");
+    modal.innerHTML = `
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="displayConfigTitle">Gui cau hinh OLED</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <form id="displayConfigForm">
+            <div class="modal-body">
+              <div class="row g-3">
+                <div class="col-12 col-md-6">
+                  <label class="form-label">Route code</label>
+                  <input class="form-control" name="routeCode" type="text">
+                </div>
+                <div class="col-12 col-md-6">
+                  <label class="form-label">Fare</label>
+                  <input class="form-control" name="fare" type="text">
+                </div>
+                <div class="col-12 col-md-6">
+                  <label class="form-label">Direction</label>
+                  <select class="form-select" name="direction">
+                    <option value="DI">DI</option>
+                    <option value="VE">VE</option>
+                  </select>
+                </div>
+                <div class="col-12 col-md-6">
+                  <label class="form-label">Current stop</label>
+                  <input class="form-control" name="currentStop" type="text">
+                </div>
+                <div class="col-12">
+                  <label class="form-label">Next stop</label>
+                  <input class="form-control" name="nextStop" type="text">
+                </div>
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Dong</button>
+              <button type="submit" class="btn btn-primary"><i class="bi bi-cast"></i> Gui OLED</button>
+            </div>
+          </form>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+  }
+  return { modal, instance: bootstrap.Modal.getOrCreateInstance(modal) };
+}
+
+function openDisplayConfigModal(row) {
+  const { modal, instance } = ensureDisplayConfigModal();
+  const form = modal.querySelector("#displayConfigForm");
+  modal.querySelector("#displayConfigTitle").textContent = `Gui cau hinh OLED - ${row.deviceId}`;
+  form.elements.routeCode.value = row.activeRouteCode || "";
+  form.elements.fare.value = row.activeFare ?? "";
+  form.elements.direction.value = displayDirectionValue(row.activeDirection);
+  form.elements.currentStop.value = "";
+  form.elements.nextStop.value = "";
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    try {
+      await api(`/api/devices/${encodeURIComponent(row.deviceId)}/display-config`, {
+        method: "POST",
+        body: JSON.stringify({
+          routeCode: form.elements.routeCode.value,
+          fare: form.elements.fare.value,
+          direction: form.elements.direction.value,
+          currentStop: form.elements.currentStop.value,
+          nextStop: form.elements.nextStop.value
+        })
+      });
+      instance.hide();
+      toast(`Da gui cau hinh OLED den ${row.deviceId}`);
+    } catch (error) {
+      toast(error.message, "danger");
+    }
+  };
+  instance.show();
+}
+
 async function loadTerminalStopOptions(config) {
   const data = await api("/api/stops?terminal=true&limit=500");
   const options = (data.items || [])
@@ -1042,6 +1135,7 @@ function renderStopSorter() {
 async function renderCrud(key) {
   const config = crud[key];
   const canMutate = state.user.role === "admin";
+  const canSendDisplayConfig = key === "devices" && ["admin", "dispatcher"].includes(state.user.role);
   root.innerHTML = `${pageTitle(config.title)}
     <section class="content-panel">
       <div class="toolbar">
@@ -1093,11 +1187,16 @@ async function renderCrud(key) {
         <tr class="${config.map === "stops" ? "clickable-row" : ""}" data-row-id="${row._id}">
           ${config.columns.map(([field]) => `<td>${field === "status" ? statusBadge(valueOf(row, field)) : valueOf(row, field)}</td>`).join("")}
           <td class="text-end">
+            ${canSendDisplayConfig ? `<button class="btn btn-sm btn-outline-success" data-display-config="${row._id}" title="Gui cau hinh OLED"><i class="bi bi-cast"></i></button>` : ""}
             ${canMutate ? `<button class="btn btn-sm btn-outline-primary" data-edit="${row._id}"><i class="bi bi-pencil"></i></button>
-            <button class="btn btn-sm btn-outline-danger" data-delete="${row._id}"><i class="bi bi-trash"></i></button>` : '<span class="badge badge-soft">Read only</span>'}
+            <button class="btn btn-sm btn-outline-danger" data-delete="${row._id}"><i class="bi bi-trash"></i></button>` : (canSendDisplayConfig ? "" : '<span class="badge badge-soft">Read only</span>')}
           </td>
         </tr>`).join("")}</tbody>
     </table>`;
+    document.querySelectorAll("[data-display-config]").forEach((button) => button.addEventListener("click", () => {
+      const row = rows.find((item) => item._id === button.dataset.displayConfig);
+      if (row) openDisplayConfigModal(row);
+    }));
     document.querySelectorAll("[data-edit]").forEach((button) => button.addEventListener("click", () => openEntityModal(config, rows.find((row) => row._id === button.dataset.edit)).catch((error) => toast(error.message, "danger"))));
     document.querySelectorAll("[data-delete]").forEach((button) => button.addEventListener("click", async () => {
       if (!confirm("Xóa bản ghi này?")) return;
@@ -1547,7 +1646,7 @@ async function renderDispatch() {
       <div class="col-12 col-xl-4">
         <section class="content-panel">
           <div class="alert offline-note">
-            Thiết bị cần có sẵn file route_ROUTE_CODE.json trên SD Card. Hệ thống chỉ gửi lệnh điều phối/override, không gửi dữ liệu tuyến qua MQTT.
+            ESP nhận lifecycle vé lệnh retained và route detail bằng MQTT chunk trên topic bus/{deviceId}/config.
           </div>
           <form id="dispatchForm" class="row g-3">
             <div class="col-12">
@@ -1620,10 +1719,23 @@ async function renderDispatch() {
         <td>${row.returnAt ? new Date(row.returnAt).toLocaleString("vi-VN") : `<input class="form-control form-control-sm" type="datetime-local" data-return-time="${row._id}">`}</td>
         <td>${statusBadge(row.status)}</td>
         <td class="text-end">
+          ${row.status !== "returned" ? `
+            <button class="btn btn-sm btn-outline-primary" data-change-direction="${row._id}" data-next-direction="${row.direction === "inbound" ? "outbound" : "inbound"}"><i class="bi bi-arrow-left-right"></i> Doi chieu</button>
+            <button class="btn btn-sm btn-outline-danger" data-delete-order="${row._id}"><i class="bi bi-trash"></i> Xoa</button>
+          ` : ""}
           ${row.status !== "returned" ? `<button class="btn btn-sm btn-outline-success" data-return="${row._id}"><i class="bi bi-box-arrow-in-down"></i> Về bến</button>` : '<span class="badge badge-soft">Đã về bến</span>'}
         </td>
       </tr>`).join("")}</tbody>
     </table></div>` : '<div class="empty-state">Chưa có vé lệnh điều phối</div>';
+
+    document.querySelectorAll("[data-change-direction]").forEach((button) => button.addEventListener("click", async () => {
+      await api(`/api/dispatch-orders/${button.dataset.changeDirection}/change-direction`, {
+        method: "POST",
+        body: JSON.stringify({ direction: button.dataset.nextDirection })
+      });
+      toast("Da doi chieu ve lenh va gui MQTT retained");
+      await loadOrders();
+    }));
 
     document.querySelectorAll("[data-return]").forEach((button) => button.addEventListener("click", async () => {
       const input = document.querySelector(`[data-return-time="${button.dataset.return}"]`);
@@ -1633,6 +1745,13 @@ async function renderDispatch() {
         body: JSON.stringify({ returnAt })
       });
       toast("Đã ghi nhận xe về bến và gỡ liên kết thiết bị");
+      await loadOrders();
+    }));
+
+    document.querySelectorAll("[data-delete-order]").forEach((button) => button.addEventListener("click", async () => {
+      if (!confirm("Xoa ve lenh nay? ESP se nhan DISPATCH_ENDED retained neu ve lenh dang active.")) return;
+      await api(`/api/dispatch-orders/${button.dataset.deleteOrder}`, { method: "DELETE" });
+      toast("Da xoa ve lenh va gui clear dispatch neu can");
       await loadOrders();
     }));
   };

@@ -5,7 +5,8 @@ import { createCrudController } from "../controllers/crudController.js";
 import crudRouter from "./_crudRouter.js";
 import asyncHandler from "../utils/asyncHandler.js";
 import { canWrite, requireAuth } from "../middleware/auth.js";
-import { lockTrip, routeOverride, routeVersion, unlockTrip } from "../controllers/dispatchController.js";
+import { displayConfig, lockTrip, routeOverride, routeVersion, unlockTrip } from "../controllers/dispatchController.js";
+import Route from "../models/Route.js";
 
 const controller = createCrudController(Device, {
   moduleName: "Device",
@@ -20,6 +21,11 @@ const controller = createCrudController(Device, {
       .populate("vehicle")
       .sort({ departureAt: -1, createdAt: -1 })
       .lean();
+    const routeCodes = [...new Set(activeOrders.map((order) => order.routeCode).filter(Boolean))];
+    const routes = routeCodes.length
+      ? await Route.find({ routeCode: { $in: routeCodes } }).select("routeCode fare").lean()
+      : [];
+    const routeByCode = new Map(routes.map((route) => [route.routeCode, route]));
     const byDevice = new Map();
     for (const order of activeOrders) {
       if (!byDevice.has(order.deviceId)) byDevice.set(order.deviceId, order);
@@ -29,7 +35,9 @@ const controller = createCrudController(Device, {
       return {
         ...item,
         activeVehicle: order?.vehicle || null,
-        activeRouteCode: order?.routeCode || ""
+        activeRouteCode: order?.routeCode || "",
+        activeDirection: order?.direction || "",
+        activeFare: order?.routeCode ? routeByCode.get(order.routeCode)?.fare ?? "" : ""
       };
     });
   },
@@ -54,6 +62,7 @@ const controller = createCrudController(Device, {
 const router = Router();
 router.post("/:deviceId/route-override", requireAuth, canWrite, asyncHandler(routeOverride));
 router.post("/:deviceId/route-version", requireAuth, canWrite, asyncHandler(routeVersion));
+router.post("/:deviceId/display-config", requireAuth, canWrite, asyncHandler(displayConfig));
 router.post("/:deviceId/unlock-trip", requireAuth, canWrite, asyncHandler(unlockTrip));
 router.post("/:deviceId/lock-trip", requireAuth, canWrite, asyncHandler(lockTrip));
 router.use("/", crudRouter(controller));

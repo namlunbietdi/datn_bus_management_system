@@ -3,10 +3,13 @@ import Device from "../models/Device.js";
 import LocationLog from "../models/LocationLog.js";
 import DeviceLastState from "../models/DeviceLastState.js";
 import DeviceEventLog from "../models/DeviceEventLog.js";
+import DispatchOrder from "../models/DispatchOrder.js";
+import Route from "../models/Route.js";
+import { getEspRouteMetadata } from "./espRouteConfigService.js";
 import { logActivity } from "./activityService.js";
 import {
   assertValidCommand,
-  assertValidUpdateNotification,
+  directionToContract,
   directionToDb,
   validateEvent,
   validateStatus,
@@ -16,6 +19,8 @@ import {
 
 let client = null;
 let connected = false;
+const ROUTE_CONFIG_CHUNK_SIZE = 800;
+const ROUTE_CONFIG_CHUNK_DELAY_MS = 200;
 
 function shouldConnect() {
   if (process.env.MQTT_URL) return !process.env.MQTT_URL.includes("xxxxxxxx");
@@ -29,6 +34,11 @@ function mqttUrl() {
   return `${protocol}://${process.env.MQTT_HOST}:${port}`;
 }
 
+function mqttClientId() {
+  const base = process.env.MQTT_CLIENT_ID || "bus-monitor";
+  return `${base}-${process.pid}`;
+}
+
 function topicPrefix() {
   const prefix = process.env.MQTT_TOPIC_COMMAND_PREFIX || "bus";
   return prefix.replace(/\/+$/, "");
@@ -36,6 +46,53 @@ function topicPrefix() {
 
 function commandTopic(deviceId) {
   return `${topicPrefix()}/${deviceId}/cmd`;
+}
+
+function configTopic(deviceId) {
+  return `${topicPrefix()}/${deviceId}/config`;
+}
+
+function normalizeDisplayDirection(direction) {
+  const value = String(direction || "").toLowerCase();
+
+  if (
+    value === "ve" ||
+    value === "về" ||
+    value === "backward" ||
+    value === "inbound" ||
+    value === "down"
+  ) {
+    return "VE";
+  }
+
+  if (
+    value === "di" ||
+    value === "đi" ||
+    value === "forward" ||
+    value === "outbound" ||
+    value === "up"
+  ) {
+    return "DI";
+  }
+
+  return direction ? String(direction).toUpperCase() : "";
+}
+
+function firstDisplayValue(...values) {
+  const value = values.find((item) => item !== undefined && item !== null && item !== "");
+  return value === undefined ? "" : value;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function chunkString(value, chunkSize = ROUTE_CONFIG_CHUNK_SIZE) {
+  const chunks = [];
+  for (let index = 0; index < value.length; index += chunkSize) {
+    chunks.push(value.slice(index, index + chunkSize));
+  }
+  return chunks;
 }
 
 function updateTopic(deviceId) {
@@ -102,6 +159,41 @@ function runtimeFieldsFromTelemetry(payload) {
   };
 }
 
+async function activeDispatchContext(deviceId) {
+  if (!deviceId) return {};
+  const order = await DispatchOrder.findOne({
+    deviceId,
+    status: { $ne: "returned" }
+  })
+    .sort({ departureAt: -1, createdAt: -1 })
+    .select("_id routeCode direction")
+    .lean();
+
+  return {
+    dispatchId: order?._id?.toString?.() || "",
+    routeCode: order?.routeCode || "",
+    direction: order?.direction || ""
+  };
+}
+
+function isActiveDispatch(context) {
+  return Boolean(context?.dispatchId && context?.routeCode);
+}
+
+function dispatchTimestamp() {
+  return Math.floor(Date.now() / 1000);
+}
+
+function routeFareValue(route) {
+  return String(firstDisplayValue(route?.fare, route?.ticketPrice, route?.price));
+}
+
+async function routeFare(routeCode) {
+  if (!routeCode) return "";
+  const route = await Route.findOne({ routeCode }).select("fare ticketPrice price").lean();
+  return routeFareValue(route);
+}
+
 function compactObject(value) {
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined));
 }
@@ -157,10 +249,13 @@ async function handleTelemetry(topic, message) {
   const timestamp = unixToDate(payload.timestamp);
   const deviceId = payload.deviceId;
   const runtime = runtimeFieldsFromTelemetry(payload);
+  const dispatch = await activeDispatchContext(deviceId);
+  const routeCode = dispatch.routeCode || payload.runtime.routeId;
+  const direction = directionToDb(dispatch.direction) || runtime.direction;
   await LocationLog.create({
     deviceId,
-    routeCode: payload.runtime.routeId,
-    direction: runtime.direction,
+    routeCode,
+    direction,
     lat: payload.gps.lat,
     lon: payload.gps.lng,
     speed: payload.gps.speed,
@@ -172,14 +267,14 @@ async function handleTelemetry(topic, message) {
     { deviceId },
     compactObject({
       deviceId,
-      routeCode: payload.runtime.routeId,
-      direction: runtime.direction,
       lat: payload.gps.lat,
       lon: payload.gps.lng,
       speed: payload.gps.speed,
       heading: payload.gps.heading,
       status: payload.gps.speed > 1 ? "running" : "stopped",
       ...runtime,
+      routeCode,
+      direction,
       lastSeenAt: timestamp
     }),
     { upsert: true, new: true }
@@ -197,10 +292,13 @@ async function handleGps(topic, message) {
   }
 
   const gps = normalized.value;
+  const dispatch = await activeDispatchContext(gps.deviceId);
+  const routeCode = dispatch.routeCode || gps.routeCode;
+  const direction = directionToDb(dispatch.direction) || gps.direction;
   await LocationLog.create({
     deviceId: gps.deviceId,
-    routeCode: gps.routeCode,
-    direction: gps.direction,
+    routeCode,
+    direction,
     lat: gps.lat,
     lon: gps.lon,
     speed: gps.speed,
@@ -212,8 +310,8 @@ async function handleGps(topic, message) {
     { deviceId: gps.deviceId },
     compactObject({
       deviceId: gps.deviceId,
-      routeCode: gps.routeCode,
-      direction: gps.direction,
+      routeCode,
+      direction,
       lat: gps.lat,
       lon: gps.lon,
       speed: gps.speed,
@@ -269,35 +367,255 @@ async function handleStatus(topic, message) {
 
 async function handleEvent(topic, message) {
   const payload = parseMessage(message);
-  const check = validateEvent(payload);
-  if (!check.valid) {
-    rejectInvalid("event", topic, check.errors);
-    return;
-  }
-
   const deviceId = topicDeviceId(topic);
   if (!deviceId) {
     rejectInvalid("event", topic, ["topic device id is missing"]);
     return;
   }
-  const timestamp = unixToDate(payload.timestamp);
-  const direction = directionToDb(payload.direction);
+  const dispatch = await activeDispatchContext(deviceId);
+  const rawDirection = dispatch.direction || payload?.direction || payload?.dir || payload?.chieu;
+  const normalizedPayload = isObject(payload)
+    ? {
+      ...payload,
+      timestamp: payload.timestamp || Math.floor(Date.now() / 1000),
+      routeId: dispatch.routeCode || payload.routeId || payload.routeCode || payload.routeNo,
+      direction: rawDirection ? directionToContract(rawDirection) : payload.direction
+    }
+    : payload;
+  const check = validateEvent(normalizedPayload);
+  if (!check.valid) {
+    rejectInvalid("event", topic, check.errors);
+    return;
+  }
+
+  if (normalizedPayload.type === "ROUTE_CONFIG_REQUEST") {
+    await handleRouteConfigRequest(deviceId, normalizedPayload);
+    return;
+  }
+
+  const timestamp = unixToDate(normalizedPayload.timestamp);
+  const direction = directionToDb(normalizedPayload.direction);
   await DeviceEventLog.create({
     deviceId,
-    type: payload.type,
-    routeCode: payload.routeId,
+    type: normalizedPayload.type,
+    routeCode: normalizedPayload.routeId,
     direction,
-    stopCode: payload.stopCode,
-    payload,
+    stopCode: normalizedPayload.stopCode,
+    payload: normalizedPayload,
     timestamp
   });
 
   await logActivity({
-    action: payload.type,
+    action: normalizedPayload.type,
     module: "DeviceEvent",
     targetId: deviceId,
-    metadata: { routeId: payload.routeId, stopCode: payload.stopCode }
+    metadata: { routeId: normalizedPayload.routeId, stopCode: normalizedPayload.stopCode }
   });
+
+  if (normalizedPayload.type === "CONFIG_REQUEST") {
+    if (!dispatch.routeCode) {
+      console.warn(`CONFIG_REQUEST ignored for ${deviceId}: active dispatch order not found`);
+      await publishNoDispatch(deviceId);
+      return;
+    }
+    await publishDispatchAssigned(deviceId, {
+      dispatchId: dispatch.dispatchId,
+      routeCode: dispatch.routeCode,
+      fare: await routeFare(dispatch.routeCode),
+      direction: dispatch.direction || normalizedPayload.direction
+    });
+    console.log(`MQTT CONFIG_REQUEST handled for ${deviceId}`);
+  }
+}
+
+async function publishRouteConfigResponse(deviceId, payload, options = {}) {
+  const topic = configTopic(deviceId);
+  const result = await publishToTopic(topic, payload, {
+    qos: 1,
+    retain: options.retain ?? false
+  });
+  console.log(`MQTT ${payload.cmd} published to ${topic}`);
+  return result;
+}
+
+async function publishRetainedDispatchState(deviceId, payload) {
+  const topic = configTopic(deviceId);
+  const message = {
+    deviceId,
+    timestamp: dispatchTimestamp(),
+    ...payload
+  };
+  const result = await publishToTopic(topic, message, { qos: 1, retain: true });
+  console.log(`${message.cmd} retained to ${topic}`);
+  return { topic, payload: message, retained: true, result };
+}
+
+export function publishNoDispatch(deviceId, cmd = "NO_DISPATCH") {
+  return publishRetainedDispatchState(deviceId, {
+    cmd,
+    dispatchActive: false,
+    dispatchId: ""
+  });
+}
+
+export function publishDispatchEnded(deviceId) {
+  return publishRetainedDispatchState(deviceId, {
+    cmd: "DISPATCH_ENDED",
+    dispatchActive: false,
+    dispatchId: ""
+  });
+}
+
+export function publishDispatchAssigned(deviceId, payload = {}) {
+  return publishRetainedDispatchState(deviceId, {
+    cmd: payload.cmd || "DISPATCH_ASSIGNED",
+    dispatchActive: true,
+    dispatchId: String(payload.dispatchId || ""),
+    routeCode: String(payload.routeCode || ""),
+    fare: String(payload.fare ?? ""),
+    direction: normalizeDisplayDirection(payload.direction)
+  });
+}
+
+export function publishDispatchDirectionChanged(deviceId, payload = {}) {
+  return publishDispatchAssigned(deviceId, {
+    ...payload,
+    cmd: "DISPATCH_DIRECTION_CHANGED"
+  });
+}
+
+export async function publishCurrentDispatchState(deviceId) {
+  const dispatch = await activeDispatchContext(deviceId);
+  if (!isActiveDispatch(dispatch)) return publishNoDispatch(deviceId);
+  return publishDispatchAssigned(deviceId, {
+    dispatchId: dispatch.dispatchId,
+    routeCode: dispatch.routeCode,
+    fare: await routeFare(dispatch.routeCode),
+    direction: dispatch.direction
+  });
+}
+
+export async function publishRouteConfigChunks(deviceId, routeCode, options = {}) {
+  const normalizedRouteCode = String(routeCode || "").trim();
+  const timestamp = options.timestamp || dispatchTimestamp();
+  if (!normalizedRouteCode) {
+    await publishRouteConfigResponse(deviceId, {
+      cmd: "ROUTE_CONFIG_ERROR",
+      deviceId,
+      routeCode: normalizedRouteCode,
+      message: "routeCode is required",
+      timestamp
+    });
+    return { skipped: true, reason: "missing_route_code" };
+  }
+
+  const metadata = await getEspRouteMetadata(normalizedRouteCode);
+  const currentVersion = String(options.currentVersion || "");
+  if (currentVersion && currentVersion === metadata.version) {
+    await publishRouteConfigResponse(deviceId, {
+      cmd: "ROUTE_CONFIG_NOT_MODIFIED",
+      deviceId,
+      routeCode: normalizedRouteCode,
+      version: metadata.version,
+      timestamp
+    });
+    return { skipped: true, reason: "not_modified", version: metadata.version };
+  }
+
+  const chunks = chunkString(metadata.jsonString);
+  console.log(`ROUTE_CONFIG chunk transfer started for ${deviceId} ${normalizedRouteCode}`);
+  await publishRouteConfigResponse(deviceId, {
+    cmd: "ROUTE_CONFIG_BEGIN",
+    deviceId,
+    routeCode: normalizedRouteCode,
+    version: metadata.version,
+    totalSize: metadata.size,
+    totalParts: chunks.length,
+    checksum: metadata.checksum,
+    chunkSize: ROUTE_CONFIG_CHUNK_SIZE,
+    timestamp
+  });
+
+  for (let index = 0; index < chunks.length; index += 1) {
+    await delay(ROUTE_CONFIG_CHUNK_DELAY_MS);
+    await publishRouteConfigResponse(deviceId, {
+      cmd: "ROUTE_CONFIG_PART",
+      deviceId,
+      routeCode: normalizedRouteCode,
+      version: metadata.version,
+      partIndex: index,
+      totalParts: chunks.length,
+      data: chunks[index]
+    });
+  }
+
+  await delay(ROUTE_CONFIG_CHUNK_DELAY_MS);
+  await publishRouteConfigResponse(deviceId, {
+    cmd: "ROUTE_CONFIG_END",
+    deviceId,
+    routeCode: normalizedRouteCode,
+    version: metadata.version,
+    totalSize: metadata.size,
+    totalParts: chunks.length,
+    checksum: metadata.checksum,
+    timestamp
+  });
+  console.log(`ROUTE_CONFIG chunk transfer completed for ${deviceId} ${normalizedRouteCode}`);
+  return {
+    routeCode: normalizedRouteCode,
+    version: metadata.version,
+    totalSize: metadata.size,
+    totalParts: chunks.length,
+    checksum: metadata.checksum
+  };
+}
+
+async function handleRouteConfigRequest(deviceId, payload) {
+  const requestedRouteCode = String(payload.routeCode || "").trim();
+  const transferMode = String(payload.transferMode || "MQTT_CHUNK");
+  const timestamp = payload.timestamp || Math.floor(Date.now() / 1000);
+  console.log(`ROUTE_CONFIG_REQUEST received from ${deviceId} routeCode=${requestedRouteCode || "(missing)"} transferMode=${transferMode}`);
+
+  const dispatch = await activeDispatchContext(deviceId);
+  if (!isActiveDispatch(dispatch)) {
+    await publishNoDispatch(deviceId);
+    return;
+  }
+
+  const activeRouteCode = dispatch.routeCode || requestedRouteCode;
+  await publishDispatchAssigned(deviceId, {
+    dispatchId: dispatch.dispatchId,
+    routeCode: activeRouteCode,
+    fare: await routeFare(activeRouteCode),
+    direction: dispatch.direction
+  });
+
+  try {
+    await publishRouteConfigChunks(deviceId, activeRouteCode, {
+      currentVersion: payload.currentVersion,
+      timestamp
+    });
+  } catch (error) {
+    await publishRouteConfigResponse(deviceId, {
+      cmd: "ROUTE_CONFIG_ERROR",
+      deviceId,
+      routeCode: activeRouteCode,
+      message: error.message || "Route config failed",
+      timestamp
+    });
+  }
+}
+
+async function syncDispatchStates() {
+  const devices = await Device.find({}).select("deviceId").lean();
+  for (const device of devices) {
+    if (!device.deviceId) continue;
+    try {
+      await publishCurrentDispatchState(device.deviceId);
+    } catch (error) {
+      console.warn(`Dispatch state sync failed for ${device.deviceId}: ${error.message}`);
+    }
+  }
 }
 
 export function connectMqtt() {
@@ -309,7 +627,7 @@ export function connectMqtt() {
   const url = mqttUrl();
 
   client = mqtt.connect(url, {
-    clientId: process.env.MQTT_CLIENT_ID || `bus-monitor-${process.pid}`,
+    clientId: mqttClientId(),
     username: process.env.MQTT_USERNAME,
     password: process.env.MQTT_PASSWORD,
     reconnectPeriod: 5000,
@@ -324,6 +642,7 @@ export function connectMqtt() {
     client.subscribe(process.env.MQTT_TOPIC_GPS || "bus/+/gps");
     client.subscribe(process.env.MQTT_TOPIC_EVENT || "bus/+/event");
     client.subscribe(process.env.MQTT_TOPIC_STATUS || "bus/+/status");
+    syncDispatchStates().catch((error) => console.warn(`Dispatch state sync failed: ${error.message}`));
   });
 
   client.on("reconnect", () => console.log("MQTT reconnecting"));
@@ -357,45 +676,43 @@ export function mqttStatus() {
   return {
     configured: shouldConnect(),
     connected,
-    clientId: process.env.MQTT_CLIENT_ID || null,
+    clientId: shouldConnect() ? mqttClientId() : null,
     topics: {
       telemetry: process.env.MQTT_TOPIC_TELEMETRY || "bus/+/telemetry",
       gps: process.env.MQTT_TOPIC_GPS || "bus/+/gps",
       event: process.env.MQTT_TOPIC_EVENT || "bus/+/event",
       status: process.env.MQTT_TOPIC_STATUS || "bus/+/status",
       cmd: `${topicPrefix()}/{deviceId}/cmd`,
+      config: `${topicPrefix()}/{deviceId}/config`,
       update: `${topicPrefix()}/{deviceId}/update`
     }
   };
 }
 
-function publishToTopic(topic, payload) {
+function publishToTopic(topic, payload, options = {}) {
   return new Promise((resolve, reject) => {
-    if (!client || !connected) {
+    if (!client || !connected || !client.connected) {
       reject(new Error("MQTT client is not connected"));
       return;
     }
-    client.publish(topic, JSON.stringify(payload), { qos: 1 }, (error) => {
+    const message = typeof payload === "string" ? payload : JSON.stringify(payload);
+    const publishOptions = {
+      qos: options.qos ?? 0,
+      retain: options.retain ?? false
+    };
+    client.publish(topic, message, publishOptions, (error) => {
       if (error) reject(error);
-      else resolve({ topic, payload });
+      else resolve({ topic, payload, options: publishOptions });
     });
   });
 }
 
 function publishCommand(deviceId, payload) {
-  return publishToTopic(commandTopic(deviceId), assertValidCommand(payload));
+  return publishToTopic(commandTopic(deviceId), assertValidCommand(payload), { qos: 1, retain: false });
 }
 
 export function publishRouteOverride(deviceId, routeCode, direction) {
   return publishCommand(deviceId, { cmd: "SET_ROUTE", routeId: routeCode, direction: direction === "inbound" ? "BACKWARD" : "FORWARD" });
-}
-
-export function publishRouteUpdate(deviceId, payload) {
-  const updatePayload = assertValidUpdateNotification({
-    type: "ROUTE_UPDATE_AVAILABLE",
-    ...payload
-  });
-  return publishToTopic(updateTopic(deviceId), updatePayload);
 }
 
 export function publishUnlockTrip(deviceId, routeCode, direction) {

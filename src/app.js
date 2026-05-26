@@ -17,6 +17,8 @@ import usersRoutes from "./routes/users.routes.js";
 import dispatchOrdersRoutes from "./routes/dispatchOrders.routes.js";
 import logsRoutes from "./routes/logs.routes.js";
 import runtimeRoutes from "./routes/runtime.routes.js";
+import espRoutes from "./routes/esp.routes.js";
+import publicRoutes from "./routes/public.routes.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -47,6 +49,8 @@ app.use("/api/users", usersRoutes);
 app.use("/api/dispatch-orders", dispatchOrdersRoutes);
 app.use("/api/logs", logsRoutes);
 app.use("/api/runtime", runtimeRoutes);
+app.use("/api/esp", espRoutes);
+app.use("/api/public", publicRoutes);
 
 app.get("/", (_req, res) => {
   res.sendFile(path.join(publicDir, "login.html"));
@@ -54,6 +58,10 @@ app.get("/", (_req, res) => {
 
 app.get("/app", (_req, res) => {
   res.sendFile(path.join(publicDir, "app.html"));
+});
+
+app.get("/guest", (_req, res) => {
+  res.sendFile(path.join(publicDir, "guest.html"));
 });
 
 app.use("/api", notFound);
