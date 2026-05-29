@@ -13,10 +13,12 @@ const controller = createCrudController(Device, {
   searchable: ["deviceId", "imei"],
   populate: "vehicle",
   afterList: async (items) => {
+    const now = Date.now();
+    const gpsTimeoutMs = Number(process.env.GPS_SIGNAL_TIMEOUT_MS || 2 * 60 * 1000);
     const deviceIds = items.map((item) => item.deviceId);
     const activeOrders = await DispatchOrder.find({
       deviceId: { $in: deviceIds },
-      status: { $ne: "returned" }
+      status: { $in: ["created", "published"] }
     })
       .populate("vehicle")
       .sort({ departureAt: -1, createdAt: -1 })
@@ -32,8 +34,12 @@ const controller = createCrudController(Device, {
     }
     return items.map((item) => {
       const order = byDevice.get(item.deviceId);
+      const lastSeenAt = item.lastSeenAt ? new Date(item.lastSeenAt).getTime() : null;
+      const stale = !lastSeenAt || now - lastSeenAt > gpsTimeoutMs;
+      const status = item.status === "online" && stale ? "offline" : item.status;
       return {
         ...item,
+        status,
         activeVehicle: order?.vehicle || null,
         activeRouteCode: order?.routeCode || "",
         activeDirection: order?.direction || "",

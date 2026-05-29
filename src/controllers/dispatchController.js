@@ -58,6 +58,37 @@ async function assignVehicleToDevice({ device, vehicle, routeCode }) {
   await vehicle.save();
 }
 
+async function closeActiveDispatchOrders(deviceId, returnAt = new Date()) {
+  const result = await DispatchOrder.updateMany(
+    {
+      deviceId,
+      status: { $in: ["created", "published", "failed"] }
+    },
+    {
+      status: "returned",
+      returnAt
+    }
+  );
+  console.log(`Active dispatch cleared for ${deviceId}`);
+  return result;
+}
+
+async function clearDeviceAssignmentAndRoute(deviceId, vehicleId, endedAt = new Date()) {
+  const device = await Device.findOne({ deviceId });
+  if (device) {
+    await DeviceAssignment.updateMany(
+      { device: device._id, status: "active" },
+      { status: "inactive", unassignedAt: endedAt }
+    );
+    device.vehicle = undefined;
+    await device.save();
+  }
+
+  if (vehicleId) {
+    await Vehicle.findByIdAndUpdate(vehicleId, { $unset: { currentRoute: "" } });
+  }
+}
+
 function contractDirection(direction) {
   return direction === "inbound" ? "BACKWARD" : "FORWARD";
 }
@@ -67,6 +98,7 @@ function routeFare(route) {
 }
 
 async function createOrder({ req, device, route, vehicle, commandType, direction, payload, departureAt }) {
+  await closeActiveDispatchOrders(device.deviceId);
   await assignVehicleToDevice({ device, vehicle, routeCode: route.routeCode });
   const order = await DispatchOrder.create({
     deviceId: device.deviceId,
@@ -176,20 +208,8 @@ export async function returnToDepot(req, res) {
   order.status = "returned";
   order.payload = { ...order.payload, returnAt };
   await order.save();
-
-  const device = await Device.findOne({ deviceId: order.deviceId });
-  if (device) {
-    await DeviceAssignment.updateMany(
-      { device: device._id, status: "active" },
-      { status: "inactive", unassignedAt: returnAt }
-    );
-    device.vehicle = undefined;
-    await device.save();
-  }
-
-  if (order.vehicle) {
-    await Vehicle.findByIdAndUpdate(order.vehicle, { $unset: { currentRoute: "" } });
-  }
+  await closeActiveDispatchOrders(order.deviceId, returnAt);
+  await clearDeviceAssignmentAndRoute(order.deviceId, order.vehicle, returnAt);
 
   try {
     const dispatchState = await publishDispatchEnded(order.deviceId);
@@ -256,36 +276,24 @@ export async function changeDirection(req, res) {
 export async function deleteDispatchOrder(req, res) {
   const order = await DispatchOrder.findById(req.params.id);
   if (!order) throw new AppError("Dispatch order not found", 404);
-  const active = order.status !== "returned";
   const endedAt = new Date();
 
-  if (active) {
-    const device = await Device.findOne({ deviceId: order.deviceId });
-    if (device) {
-      await DeviceAssignment.updateMany(
-        { device: device._id, status: "active" },
-        { status: "inactive", unassignedAt: endedAt }
-      );
-      device.vehicle = undefined;
-      await device.save();
-    }
-    if (order.vehicle) {
-      await Vehicle.findByIdAndUpdate(order.vehicle, { $unset: { currentRoute: "" } });
-    }
-    try {
-      await publishDispatchEnded(order.deviceId);
-    } catch (error) {
-      console.warn(`DISPATCH_ENDED publish failed for ${order.deviceId}: ${error.message}`);
-    }
+  await closeActiveDispatchOrders(order.deviceId, endedAt);
+  await clearDeviceAssignmentAndRoute(order.deviceId, order.vehicle, endedAt);
+  await DispatchOrder.deleteOne({ _id: order._id });
+
+  try {
+    await publishDispatchEnded(order.deviceId);
+  } catch (error) {
+    console.warn(`DISPATCH_ENDED publish failed for ${order.deviceId}: ${error.message}`);
   }
 
-  await DispatchOrder.deleteOne({ _id: order._id });
   await logActivity({
     user: req.user,
     action: "DELETE_DISPATCH_ORDER",
     module: "DispatchOrder",
     targetId: order._id.toString(),
-    metadata: { deviceId: order.deviceId, routeCode: order.routeCode, active }
+    metadata: { deviceId: order.deviceId, routeCode: order.routeCode }
   });
   ok(res, { deleted: true, id: order._id.toString() });
 }

@@ -105,6 +105,33 @@ function routeGeoJsonByDirection(route, direction) {
   };
 }
 
+function normalizeDirectionStop(stop, directionStop) {
+  return {
+    stopCode: String(stop?.stopCode || directionStop.stopCode || ""),
+    name: String(stop?.name || ""),
+    lat: Number(stop?.lat),
+    lon: Number(stop?.lon),
+    order: Number(directionStop.order),
+    terminal: Boolean(directionStop.terminal)
+  };
+}
+
+async function routeStopsByDirection(routeCode, direction) {
+  const routeDirection = await RouteDirection.findOne({ routeCode, direction, status: "active" })
+    .populate("stops.stop")
+    .lean();
+  if (!routeDirection?.stops?.length) return [];
+
+  const sortedDirectionStops = [...routeDirection.stops].sort((a, b) => Number(a.order) - Number(b.order));
+  const stopCodes = sortedDirectionStops.map((item) => item.stopCode).filter(Boolean);
+  const fallbackStops = stopCodes.length ? await Stop.find({ stopCode: { $in: stopCodes } }).lean() : [];
+  const stopByCode = new Map(fallbackStops.map((stop) => [stop.stopCode, stop]));
+
+  return sortedDirectionStops
+    .map((item) => normalizeDirectionStop(item.stop || stopByCode.get(item.stopCode), item))
+    .filter((stop) => stop.stopCode && Number.isFinite(stop.lat) && Number.isFinite(stop.lon));
+}
+
 export async function getGeoJsonByRouteCode(req, res) {
   const direction = normalizeDirection(req.query.direction);
   if (!direction) throw new AppError("Invalid GeoJSON direction", 400);
@@ -114,10 +141,12 @@ export async function getGeoJsonByRouteCode(req, res) {
 
   const result = routeGeoJsonByDirection(route, direction);
   if (!result.geoJson) throw new AppError("GeoJSON route direction not found", 404);
+  const stops = await routeStopsByDirection(route.routeCode, direction);
 
   ok(res, {
     routeCode: route.routeCode,
     displayName: route.displayName,
+    stops,
     ...result
   });
 }

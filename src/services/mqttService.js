@@ -121,6 +121,12 @@ function numberOrUndefined(value) {
   return Number.isFinite(number) ? number : undefined;
 }
 
+function integerOrUndefined(value) {
+  if (value === undefined || value === null || value === "") return undefined;
+  const number = Number(value);
+  return Number.isInteger(number) ? number : undefined;
+}
+
 function dateFromPayloadTimestamp(value) {
   if (Number.isInteger(value)) {
     return new Date(value > 1_000_000_000_000 ? value : value * 1000);
@@ -163,7 +169,7 @@ async function activeDispatchContext(deviceId) {
   if (!deviceId) return {};
   const order = await DispatchOrder.findOne({
     deviceId,
-    status: { $ne: "returned" }
+    status: { $in: ["created", "published"] }
   })
     .sort({ departureAt: -1, createdAt: -1 })
     .select("_id routeCode direction")
@@ -219,12 +225,20 @@ function gpsPayloadFromMessage(topic, payload) {
 
   const runtime = isObject(payload.runtime) ? payload.runtime : payload;
   const network = isObject(payload.network) ? payload.network : payload;
+  const currentStop = integerOrUndefined(runtime.currentStop);
+  const nextStop = integerOrUndefined(runtime.nextStop);
   return {
     value: compactObject({
       deviceId,
       timestamp: dateFromPayloadTimestamp(payload.timestamp ?? gps.timestamp),
       routeCode: runtime.routeId || runtime.routeCode,
       direction: directionToDb(runtime.direction) || runtime.direction,
+      runtimeStatus: runtime.tripState || runtime.runtimeStatus,
+      tripState: runtime.tripState,
+      activeStopCode: runtime.activeStopCode || runtime.currentStopCode,
+      nextStopCode: runtime.nextStopCode,
+      currentStop,
+      nextStop,
       lat,
       lon,
       speed,
@@ -251,7 +265,7 @@ async function handleTelemetry(topic, message) {
   const runtime = runtimeFieldsFromTelemetry(payload);
   const dispatch = await activeDispatchContext(deviceId);
   const routeCode = dispatch.routeCode || payload.runtime.routeId;
-  const direction = directionToDb(dispatch.direction) || runtime.direction;
+  const direction = runtime.direction || directionToDb(dispatch.direction);
   await LocationLog.create({
     deviceId,
     routeCode,
@@ -294,7 +308,7 @@ async function handleGps(topic, message) {
   const gps = normalized.value;
   const dispatch = await activeDispatchContext(gps.deviceId);
   const routeCode = dispatch.routeCode || gps.routeCode;
-  const direction = directionToDb(dispatch.direction) || gps.direction;
+  const direction = gps.direction || directionToDb(dispatch.direction);
   await LocationLog.create({
     deviceId: gps.deviceId,
     routeCode,
@@ -317,6 +331,12 @@ async function handleGps(topic, message) {
       speed: gps.speed,
       heading: gps.heading,
       status: gps.speed > 1 ? "running" : "stopped",
+      runtimeStatus: gps.runtimeStatus,
+      tripState: gps.tripState,
+      activeStopCode: gps.activeStopCode,
+      nextStopCode: gps.nextStopCode,
+      currentStop: gps.currentStop,
+      nextStop: gps.nextStop,
       gpsSat: gps.gpsSat,
       gpsFix: gps.gpsFix,
       networkMqtt: gps.networkMqtt,
@@ -373,12 +393,17 @@ async function handleEvent(topic, message) {
     return;
   }
   const dispatch = await activeDispatchContext(deviceId);
-  const rawDirection = dispatch.direction || payload?.direction || payload?.dir || payload?.chieu;
+  const rawDirection = payload?.type === "BUTTON_ACTION"
+    ? payload?.direction || payload?.dir || payload?.chieu || dispatch.direction
+    : dispatch.direction || payload?.direction || payload?.dir || payload?.chieu;
+  const rawRouteId = payload?.type === "BUTTON_ACTION"
+    ? payload?.routeId || payload?.routeCode || payload?.routeNo
+    : dispatch.routeCode || payload?.routeId || payload?.routeCode || payload?.routeNo;
   const normalizedPayload = isObject(payload)
     ? {
       ...payload,
       timestamp: payload.timestamp || Math.floor(Date.now() / 1000),
-      routeId: dispatch.routeCode || payload.routeId || payload.routeCode || payload.routeNo,
+      routeId: rawRouteId,
       direction: rawDirection ? directionToContract(rawDirection) : payload.direction
     }
     : payload;
@@ -398,7 +423,7 @@ async function handleEvent(topic, message) {
   await DeviceEventLog.create({
     deviceId,
     type: normalizedPayload.type,
-    routeCode: normalizedPayload.routeId,
+    routeCode: normalizedPayload.routeId || normalizedPayload.routeCode,
     direction,
     stopCode: normalizedPayload.stopCode,
     payload: normalizedPayload,
@@ -409,8 +434,17 @@ async function handleEvent(topic, message) {
     action: normalizedPayload.type,
     module: "DeviceEvent",
     targetId: deviceId,
-    metadata: { routeId: normalizedPayload.routeId, stopCode: normalizedPayload.stopCode }
+    metadata: {
+      routeId: normalizedPayload.routeId,
+      action: normalizedPayload.action,
+      result: normalizedPayload.result,
+      stopCode: normalizedPayload.stopCode
+    }
   });
+
+  if (normalizedPayload.type === "BUTTON_ACTION") {
+    console.log(`Device event BUTTON_ACTION saved for ${deviceId} action=${normalizedPayload.action} result=${normalizedPayload.result}`);
+  }
 
   if (normalizedPayload.type === "CONFIG_REQUEST") {
     if (!dispatch.routeCode) {
@@ -454,7 +488,13 @@ export function publishNoDispatch(deviceId, cmd = "NO_DISPATCH") {
   return publishRetainedDispatchState(deviceId, {
     cmd,
     dispatchActive: false,
-    dispatchId: ""
+    dispatchId: "",
+    routeCode: "",
+    fare: "",
+    direction: "",
+    currentStop: "",
+    nextStop: "",
+    routeLoaded: false
   });
 }
 
@@ -462,7 +502,13 @@ export function publishDispatchEnded(deviceId) {
   return publishRetainedDispatchState(deviceId, {
     cmd: "DISPATCH_ENDED",
     dispatchActive: false,
-    dispatchId: ""
+    dispatchId: "",
+    routeCode: "",
+    fare: "",
+    direction: "",
+    currentStop: "",
+    nextStop: "",
+    routeLoaded: false
   });
 }
 
@@ -486,7 +532,10 @@ export function publishDispatchDirectionChanged(deviceId, payload = {}) {
 
 export async function publishCurrentDispatchState(deviceId) {
   const dispatch = await activeDispatchContext(deviceId);
-  if (!isActiveDispatch(dispatch)) return publishNoDispatch(deviceId);
+  if (!isActiveDispatch(dispatch)) {
+    console.log(`No active dispatch found for ${deviceId}`);
+    return publishNoDispatch(deviceId);
+  }
   return publishDispatchAssigned(deviceId, {
     dispatchId: dispatch.dispatchId,
     routeCode: dispatch.routeCode,
@@ -578,6 +627,7 @@ async function handleRouteConfigRequest(deviceId, payload) {
 
   const dispatch = await activeDispatchContext(deviceId);
   if (!isActiveDispatch(dispatch)) {
+    console.log(`No active dispatch found for ${deviceId}`);
     await publishNoDispatch(deviceId);
     return;
   }

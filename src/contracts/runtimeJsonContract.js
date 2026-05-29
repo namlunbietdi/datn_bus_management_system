@@ -10,7 +10,8 @@ export const EVENT_TYPES = [
   "STOP_TRIGGERED",
   "CRASH_RECOVERY",
   "CONFIG_REQUEST",
-  "ROUTE_CONFIG_REQUEST"
+  "ROUTE_CONFIG_REQUEST",
+  "BUTTON_ACTION"
 ];
 export const COMMANDS = [
   "NEXT_STOP",
@@ -131,6 +132,18 @@ export function validateEvent(payload) {
 
   pushRequired(errors, hasEnum(payload.type, EVENT_TYPES), "type", EVENT_TYPES.join("|"));
   pushRequired(errors, isUnixTimestamp(payload.timestamp), "timestamp", "a unix timestamp in seconds");
+  if (payload.type === "BUTTON_ACTION") {
+    pushRequired(errors, isNonEmptyString(payload.action), "action", "a non-empty string");
+    pushRequired(errors, isNonEmptyString(payload.result), "result", "a non-empty string");
+    pushRequired(errors, payload.routeId === undefined || typeof payload.routeId === "string", "routeId", "a string when present");
+    pushRequired(errors, payload.direction === undefined || isDirectionLike(payload.direction), "direction", "FORWARD|BACKWARD|DI|VE when present");
+    pushRequired(errors, payload.stopCode === undefined || typeof payload.stopCode === "string", "stopCode", "a string when present");
+    pushRequired(errors, payload.currentStop === undefined || typeof payload.currentStop === "string", "currentStop", "a string when present");
+    pushRequired(errors, payload.nextStop === undefined || typeof payload.nextStop === "string", "nextStop", "a string when present");
+    pushRequired(errors, payload.currentStopCode === undefined || typeof payload.currentStopCode === "string", "currentStopCode", "a string when present");
+    pushRequired(errors, payload.nextStopCode === undefined || typeof payload.nextStopCode === "string", "nextStopCode", "a string when present");
+    return result(errors, payload);
+  }
   if (payload.type === "ROUTE_CONFIG_REQUEST") {
     pushRequired(errors, isNonEmptyString(payload.routeCode), "routeCode", "a non-empty string");
     pushRequired(errors, payload.currentVersion === undefined || typeof payload.currentVersion === "string", "currentVersion", "a string when present");

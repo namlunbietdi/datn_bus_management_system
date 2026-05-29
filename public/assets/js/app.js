@@ -18,6 +18,7 @@ const state = {
   monitoringSelectedKey: null,
   monitoringDrawnRouteKey: null,
   monitoringRouteCache: new Map(),
+  monitoringMarkerByKey: new Map(),
   monitoringKeyHandler: null,
   monitoringFullscreenHandler: null
 };
@@ -714,6 +715,147 @@ function monitoringLatLng(row) {
   return Number.isFinite(lat) && Number.isFinite(lng) ? [lat, lng] : null;
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function monitoringMarkerPopup(row) {
+  const label = escapeHtml(row.vehiclePlate || row.deviceId);
+  const route = escapeHtml(`${row.runtime?.routeId || ""} ${row.runtime?.direction || ""}`.trim());
+  const speed = row.gps?.status === "lost"
+    ? "Vi tri GPS cuoi cung"
+    : `${escapeHtml(row.gps?.speed || 0)} km/h`;
+  return `<strong>${label}</strong><br>${route}<br>${speed}`;
+}
+
+function monitoringBusIcon(row) {
+  const heading = Number(row.gps?.heading || 0);
+  const statusClass = row.gps?.status === "lost" || row.status === "signal_lost" ? "lost" : "active";
+  const transform = Number.isFinite(heading) ? ` style="transform: rotate(${heading}deg)"` : "";
+  return L.divIcon({
+    className: "",
+    html: `<div class="monitoring-bus-icon ${statusClass}"${transform}><i class="bi bi-bus-front-fill"></i></div>`,
+    iconSize: [42, 42],
+    iconAnchor: [21, 21],
+    popupAnchor: [0, -22]
+  });
+}
+
+function cancelMonitoringMarkerAnimation(marker) {
+  if (marker?._monitoringAnimationFrame) {
+    cancelAnimationFrame(marker._monitoringAnimationFrame);
+    marker._monitoringAnimationFrame = null;
+  }
+}
+
+function animateMonitoringMarker(marker, targetPoint, duration = 2600) {
+  const target = L.latLng(targetPoint[0], targetPoint[1]);
+  const start = marker.getLatLng();
+  if (!start || start.equals(target)) {
+    marker.setLatLng(target);
+    return;
+  }
+
+  cancelMonitoringMarkerAnimation(marker);
+  const startedAt = performance.now();
+  const startLat = start.lat;
+  const startLng = start.lng;
+  const deltaLat = target.lat - startLat;
+  const deltaLng = target.lng - startLng;
+
+  const tick = (now) => {
+    const progress = Math.min((now - startedAt) / duration, 1);
+    const eased = progress < 0.5
+      ? 2 * progress * progress
+      : 1 - ((-2 * progress + 2) ** 2) / 2;
+    marker.setLatLng([startLat + deltaLat * eased, startLng + deltaLng * eased]);
+    if (progress < 1) {
+      marker._monitoringAnimationFrame = requestAnimationFrame(tick);
+    } else {
+      marker._monitoringAnimationFrame = null;
+      marker.setLatLng(target);
+    }
+  };
+
+  marker._monitoringAnimationFrame = requestAnimationFrame(tick);
+}
+
+function updateMonitoringVehicleMarkers(rows) {
+  const seenKeys = new Set();
+
+  for (const row of rows) {
+    const key = monitoringKey(row);
+    const point = monitoringLatLng(row);
+    if (!key || !point) continue;
+    seenKeys.add(key);
+
+    let marker = state.monitoringMarkerByKey.get(key);
+    if (!marker) {
+      marker = L.marker(point, { icon: monitoringBusIcon(row) }).addTo(state.map);
+      marker.monitoringKey = key;
+      state.monitoringMarkerByKey.set(key, marker);
+    } else {
+      marker.setIcon(monitoringBusIcon(row));
+      animateMonitoringMarker(marker, point);
+    }
+
+    const popup = monitoringMarkerPopup(row);
+    if (marker.getPopup()) {
+      marker.setPopupContent(popup);
+    } else {
+      marker.bindPopup(popup);
+    }
+  }
+
+  for (const [key, marker] of state.monitoringMarkerByKey.entries()) {
+    if (seenKeys.has(key)) continue;
+    cancelMonitoringMarkerAnimation(marker);
+    marker.remove();
+    state.monitoringMarkerByKey.delete(key);
+  }
+
+  state.markers = [...state.monitoringMarkerByKey.values()];
+}
+
+function clearMonitoringVehicleMarkers() {
+  for (const marker of state.monitoringMarkerByKey.values()) {
+    cancelMonitoringMarkerAnimation(marker);
+    marker.remove();
+  }
+  state.monitoringMarkerByKey.clear();
+  state.markers = [];
+}
+
+function monitoringStopText(stopDetail, runtimeIndex) {
+  if (stopDetail?.name || stopDetail?.stopCode) {
+    const title = stopDetail.name || "Điểm dừng";
+    const code = stopDetail.stopCode ? ` (${stopDetail.stopCode})` : "";
+    const order = Number.isFinite(Number(stopDetail.order)) ? ` · thứ tự ${stopDetail.order}` : "";
+    return escapeHtml(`${title}${code}${order}`);
+  }
+  return Number.isInteger(runtimeIndex) ? `Stop ${runtimeIndex}` : "-";
+}
+
+function monitoringNextStopLine(row) {
+  const nextStop = row.runtime?.nextStop;
+  const nextStopDetail = row.runtime?.nextStopDetail;
+  if (!Number.isInteger(nextStop) && !nextStopDetail) return "";
+  return `<div class="small">Điểm dừng tiếp theo: ${monitoringStopText(nextStopDetail, nextStop)}</div>`;
+}
+
+function monitoringActiveStop(row, stop, index) {
+  const nextStop = Number(row?.runtime?.nextStop);
+  const currentStop = Number(row?.runtime?.currentStop);
+  const order = Number(stop?.order || index + 1);
+  return Number.isInteger(nextStop) && (nextStop === order || (nextStop === 0 && index === 0))
+    || Number.isInteger(currentStop) && (currentStop === order || (currentStop === 0 && index === 0));
+}
+
 function fitMonitoringSelection(routeLayer, row) {
   const vehiclePoint = monitoringLatLng(row);
   const routeBounds = routeLayer?.getBounds?.();
@@ -759,13 +901,22 @@ async function drawMonitoringRoute(row, options = {}) {
   }
 
   removeLayerSafely("monitoringRoute");
-  const layer = L.geoJSON(routeData.geoJson, {
+  const layer = L.featureGroup().addTo(state.map);
+  L.geoJSON(routeData.geoJson, {
     style: {
       color: direction === "inbound" ? "#188038" : "#0d6efd",
       weight: 6,
       opacity: 0.88
     }
-  }).addTo(state.map);
+  }).addTo(layer);
+  (routeData.stops || []).forEach((stop, index) => {
+    const lat = Number(stop.lat);
+    const lon = Number(stop.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    const active = monitoringActiveStop(row, stop, index);
+    const marker = L.marker([lat, lon], { icon: stopIcon(index + 1, active) }).addTo(layer);
+    marker.bindPopup(`<strong>${stop.stopCode || ""}</strong><br>${stop.name || ""}<br>${direction === "inbound" ? "Chieu ve" : "Chieu di"} - Stop ${index + 1}`);
+  });
   state.mapLayers.monitoringRoute = layer;
   state.monitoringDrawnRouteKey = cacheKey;
   if (hint) hint.textContent = `${routeCode} · ${direction === "inbound" ? "chiều về" : "chiều đi"}`;
@@ -1425,15 +1576,16 @@ async function renderRoutes() {
       return;
     }
     document.getElementById("tableHost").innerHTML = `<table class="table table-hover">
-      <thead><tr><th>Route code</th><th>Tên tuyến</th><th>Điểm đầu</th><th>Điểm cuối</th><th>Giá vé</th><th>Thời gian tạo</th><th>Lần chỉnh sửa gần nhất</th><th>GeoJSON</th><th>Outbound</th><th>Inbound</th><th>Trạng thái</th><th class="text-end">Thao tác</th></tr></thead>
+      <thead><tr><th>Route code</th><th>Tên tuyến</th><th>Version</th><th>Điểm đầu</th><th>Điểm cuối</th><th>Giá vé</th><th>Thời gian tạo</th><th>Lần chỉnh sửa gần nhất</th><th>GeoJSON</th><th>Outbound</th><th>Inbound</th><th>Trạng thái</th><th class="text-end">Thao tác</th></tr></thead>
       <tbody>${rows.map((row) => `
         <tr class="clickable-row" data-route-id="${row._id}">
-          <td><strong>${row.routeCode}</strong></td><td>${row.displayName}</td><td>${row.startPoint || ""}</td><td>${row.endPoint || ""}</td>
+          <td><strong>${row.routeCode}</strong></td><td>${row.displayName}</td><td><span class="badge text-bg-info">${row.version || 1}</span></td><td>${row.startPoint || ""}</td><td>${row.endPoint || ""}</td>
           <td>${formatFare(row.fare)}</td><td>${formatDateTime(row.createdAt)}</td><td>${formatDateTime(row.updatedAt)}</td><td><span class="badge ${row.hasOutboundGeoJson ? "text-bg-success" : "text-bg-secondary"}">Đi</span> <span class="badge ${row.hasInboundGeoJson ? "text-bg-success" : "text-bg-secondary"}">Về</span></td><td>${row.outboundCount}</td><td>${row.inboundCount}</td><td>${statusBadge(row.status)}</td>
           <td class="text-end">
             <button class="btn btn-sm btn-outline-primary" data-export="${row.routeCode}"><i class="bi bi-download"></i> JSON</button>
             <button class="btn btn-sm btn-outline-primary" data-geojson="${row._id}"><i class="bi bi-map"></i> GeoJSON</button>
             ${canMutate ? `<button class="btn btn-sm btn-outline-secondary" data-sort-stops="${row.routeCode}"><i class="bi bi-list-ol"></i> Sắp xếp điểm dừng</button>
+            <button class="btn btn-sm btn-outline-warning" data-increase-version="${row._id}" title="Tăng version route config"><i class="bi bi-arrow-up-circle"></i> Version</button>
             <button class="btn btn-sm btn-outline-primary" data-edit="${row._id}"><i class="bi bi-pencil"></i></button>
             <button class="btn btn-sm btn-outline-danger" data-delete="${row._id}"><i class="bi bi-trash"></i></button>` : ""}
           </td>
@@ -1445,6 +1597,14 @@ async function renderRoutes() {
       openRouteGeoJsonModal(rows.find((row) => row._id === button.dataset.geojson)).catch((error) => toast(error.message, "danger"));
     }));
     document.querySelectorAll("[data-sort-stops]").forEach((button) => button.addEventListener("click", () => openDirectionSorter(rows.find((row) => row.routeCode === button.dataset.sortStops), "outbound").catch((error) => toast(error.message, "danger"))));
+    document.querySelectorAll("[data-increase-version]").forEach((button) => button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      const route = rows.find((row) => row._id === button.dataset.increaseVersion);
+      if (!route) return;
+      const updated = await api(`/api/routes/${route._id}/increase-version`, { method: "PUT" });
+      toast(`Da tang version ${route.routeCode} len ${updated.version}`);
+      await load();
+    }));
     document.querySelectorAll("[data-edit]").forEach((button) => button.addEventListener("click", () => openEntityModal(routeConfig, rows.find((row) => row._id === button.dataset.edit)).catch((error) => toast(error.message, "danger"))));
     document.querySelectorAll("[data-delete]").forEach((button) => button.addEventListener("click", async () => {
       if (!confirm("Xóa tuyến này?")) return;
@@ -1492,6 +1652,7 @@ async function renderMonitoring() {
     document.removeEventListener("fullscreenchange", state.monitoringFullscreenHandler);
     state.monitoringFullscreenHandler = null;
   }
+  clearMonitoringVehicleMarkers();
   root.innerHTML = `${pageTitle("Giám sát phương tiện")}
     <div class="monitoring-stage row g-3" id="monitoringStage">
       <div class="monitoring-map-column col-12 col-xl-8">
@@ -1509,7 +1670,7 @@ async function renderMonitoring() {
             <button class="btn btn-outline-primary btn-sm" id="refreshBtn" type="button" title="Làm mới"><i class="bi bi-arrow-clockwise"></i></button>
           </div>
           <div class="small text-secondary mb-1" id="monitoringRouteHint">Chon xe de hien thi tuyen</div>
-          <div class="small text-secondary mb-2" id="monitoringRefreshStatus">Tu dong cap nhat moi 5 giay</div>
+          <div class="small text-secondary mb-2" id="monitoringRefreshStatus">Tu dong cap nhat moi 3 giay</div>
           <div id="vehicleList"></div>
         </section>
       </div>
@@ -1563,15 +1724,8 @@ async function renderMonitoring() {
       addBaseMap(state.map);
       L.control.zoom({ position: "bottomright" }).addTo(state.map);
     }
-    state.markers.forEach((marker) => marker.remove());
     const rowsWithGps = rows.filter((row) => Number.isFinite(Number(row.gps?.lat)) && Number.isFinite(Number(row.gps?.lng)));
-    state.markers = rowsWithGps.map((row) => {
-      const key = monitoringKey(row);
-      const marker = L.marker([Number(row.gps.lat), Number(row.gps.lng)]).addTo(state.map);
-      marker.bindPopup(`<strong>${row.vehiclePlate || row.deviceId}</strong><br>${row.runtime?.routeId || ""} ${row.runtime?.direction || ""}<br>${row.gps?.status === "lost" ? "Vị trí GPS cuối cùng" : `${row.gps?.speed || 0} km/h`}`);
-      marker.monitoringKey = key;
-      return marker;
-    });
+    updateMonitoringVehicleMarkers(rowsWithGps);
     if (state.markers.length && !state.monitoringSelectedKey) {
       state.map.fitBounds(L.featureGroup(state.markers).getBounds().pad(0.2));
     } else if (!state.monitoringSelectedKey) {
@@ -1581,6 +1735,7 @@ async function renderMonitoring() {
       <div class="border-bottom py-3 clickable-row ${state.monitoringSelectedKey === monitoringKey(row) ? "table-active" : ""}" data-monitoring-order="${monitoringKey(row)}">
         <div class="small text-secondary">Runtime: ${row.runtime?.routeId || "-"} ${row.runtime?.direction || ""} - Source: ${row.stateSource === "esp32" ? "ESP32" : "dispatch"}</div>
         <div class="small">${Number.isInteger(row.runtime?.currentStop) ? `Current stop: ${row.runtime.currentStop}` : ""}${Number.isInteger(row.runtime?.nextStop) ? ` - Next: ${row.runtime.nextStop}` : ""}</div>
+        ${monitoringNextStopLine(row)}
         <div class="d-flex justify-content-between gap-2"><strong>${row.vehiclePlate || "Chưa gắn xe"}</strong>${statusBadge(row.status)}</div>
         <div class="small text-secondary">Thiết bị: ${row.deviceId} · Tuyến: ${row.runtime?.routeId || "-"} · Chiều: ${row.runtime?.direction || "-"}</div>
         <div class="small">Xuất bến: ${row.departureAt ? new Date(row.departureAt).toLocaleString("vi-VN") : "-"}</div>
@@ -1623,7 +1778,7 @@ async function renderMonitoring() {
       const status = document.getElementById("monitoringRefreshStatus");
       if (status) status.textContent = `Loi cap nhat: ${error.message}`;
     });
-  }, 5000);
+  }, 3000);
   document.getElementById("monitoringFullscreenBtn").addEventListener("click", () => {
     setMonitoringFullscreen(!state.monitoringFullscreen);
   });
@@ -1758,11 +1913,12 @@ async function renderDispatch() {
 
   document.getElementById("dispatchForm").addEventListener("submit", async (event) => {
     event.preventDefault();
-    const payload = formPayload(event.currentTarget);
+    const form = event.currentTarget;
+    const payload = formPayload(form);
     await api("/api/dispatch-orders", { method: "POST", body: JSON.stringify(payload) });
     toast("Đã tạo vé lệnh điều phối");
-    event.currentTarget.reset();
-    loadOrders().catch((error) => toast(error.message, "danger"));
+    form.reset();
+    await loadOrders();
   });
   document.getElementById("refreshOrders").addEventListener("click", () => loadOrders().catch((error) => toast(error.message, "danger")));
   await loadOrders();
@@ -1812,6 +1968,7 @@ async function route() {
     state.monitoringFullscreenHandler = null;
   }
   if (state.map) {
+    clearMonitoringVehicleMarkers();
     try {
       state.map.remove();
     } catch {

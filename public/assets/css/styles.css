@@ -317,6 +317,33 @@ body {
   line-height: 1;
 }
 
+.monitoring-bus-icon {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border: 3px solid #fff;
+  border-radius: 999px;
+  color: #fff;
+  background: #0f766e;
+  box-shadow: 0 10px 24px rgba(15, 118, 110, 0.32);
+  transform-origin: 50% 50%;
+}
+
+.monitoring-bus-icon i {
+  display: grid;
+  place-items: center;
+  font-size: 1.35rem;
+  line-height: 1;
+}
+
+.monitoring-bus-icon.lost {
+  color: #334155;
+  background: #cbd5e1;
+  box-shadow: 0 8px 18px rgba(51, 65, 85, 0.2);
+  opacity: 0.78;
+}
+
 .leaflet-container {
   font-family: var(--font-ui);
   background: #eef4f8;
